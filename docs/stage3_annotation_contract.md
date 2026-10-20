@@ -64,7 +64,11 @@ row-count-mismatched shards make finalization fail; a partial dataset is never
 published.
 
 gnomAD region-size errors trigger recursive subdivision whether returned in a
-successful HTTP response or an HTTP error. Truncated responses and disconnected
+successful HTTP response or an HTTP error. Two consecutive generic HTTP 500
+responses also trigger subdivision; a single transient error is retried first.
+Splitting stops at the minimum query window, where failures remain failures.
+Both halves must succeed before the complete cache tile is published; rate limits
+never trigger splitting. Truncated responses and disconnected
 connections use the bounded transport retry policy. HTTP failures retain a
 bounded provider response excerpt in their diagnostic message. The pipeline
 retains successful shared-cache tiles and retries unresolved tiles in delayed

@@ -69,8 +69,9 @@ does not prevent attempting other batches in the same wave.
 
 To extend or correct a version, use the same output store and add
 `--parent /absolute/path/to/snapshots/<SHA256>.json`. Without a refresh request,
-only missing tiles are acquired. Include every source run from the parent in
-the run-ID list. Add `--refresh-region 1:START-END` to reacquire
+only missing tiles are acquired. You may select only batches with pending tiles;
+the parent retains all other source bindings and successful fragments. Every
+pending tile must belong to a selected batch. Add `--refresh-region 1:START-END` to reacquire
 particular tiles, bypassing old cached responses for those tiles only. An
 interrupted refresh resumes its own cache. Keep snapshot IDs used in papers;
 there is no implicit mutable `latest` selection.

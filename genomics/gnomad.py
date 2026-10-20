@@ -203,6 +203,7 @@ def fetch_region_variants_recursive(
         raise ValueError("max_attempts must be >= 1")
 
     variables = {"chrom": chrom, "start": start, "stop": stop}
+    consecutive_internal_errors = 0
     for attempt in range(1, max_attempts + 1):
         retry_error: Exception | None = None
         try:
@@ -221,11 +222,20 @@ def fetch_region_variants_recursive(
             joined = " | ".join(message.lower() for message in messages)
             retry_error = RuntimeError(f"GraphQL errors: {joined}")
 
-        if "select a smaller region" in joined or "too many variants" in joined:
+        consecutive_internal_errors = (
+            consecutive_internal_errors + 1
+            if isinstance(retry_error, HTTPError) and retry_error.code == 500 and "rate limit" not in joined else 0
+        )
+        size_error = "select a smaller region" in joined or "too many variants" in joined
+        # Some dense regions return generic HTTP 500 instead of a size error.
+        # Retry once before changing the query, and never split rate limits.
+        persistent_internal_error = consecutive_internal_errors >= 2
+        if size_error or (persistent_internal_error and (stop - start + 1) > GNOMAD_REGION_MIN_WINDOW_BP):
             if (stop - start + 1) <= GNOMAD_REGION_MIN_WINDOW_BP:
                 raise retry_error
             mid = (start + stop) // 2
-            logger.info(f"Splitting gnomAD region {chrom}:{start}-{stop} due to API constraint.")
+            logger.info("Splitting gnomAD region %s:%s-%s: %s", chrom, start, stop,
+                        "region size constraint" if size_error else "repeated HTTP 500")
             left = fetch_region_variants_recursive(chrom, start, mid, max_attempts)
             right = fetch_region_variants_recursive(chrom, mid + 1, stop, max_attempts)
             return left + right

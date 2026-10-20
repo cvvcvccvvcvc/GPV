@@ -124,6 +124,87 @@ def test_http_failure_retains_bounded_provider_detail(monkeypatch: pytest.Monkey
     assert sleeps == []
 
 
+def test_repeated_generic_500_splits_and_caches_only_complete_tile(tmp_path, monkeypatch):
+    from genomics.gnomad_cache import GnomadRegionCache
+    calls = []
+    def execute(_query, variables):
+        start, stop = variables['start'], variables['stop']
+        calls.append((start, stop))
+        if stop - start + 1 > 12500:
+            raise HTTPError('https://example.test', 500, 'An unknown error occurred', None, None)
+        return {'data': {'region': {'variants': [
+            {'chrom':'1','pos':pos,'ref':'A','alt':'G'} for pos in (start, stop)
+        ]}}}
+    monkeypatch.setattr(gnomad, 'execute_graphql', execute)
+    sleeps = disable_retry_wait(monkeypatch)
+    cache = GnomadRegionCache(tmp_path, fetcher=gnomad.fetch_region_variants_recursive)
+    assert [r['pos'] for r in cache.fetch_region('1', 1, 25000)] == [1,12500,12501,25000]
+    assert calls == [(1,25000),(1,25000),(1,12500),(12501,25000)]
+    assert sleeps == [5.0]
+    cache.fetch_region('1', 1, 25000)
+    assert len(calls) == 4
+    assert len(list(tmp_path.rglob('*.json.gz'))) == 1
+
+
+def test_failed_half_never_publishes_partial_tile(tmp_path, monkeypatch):
+    from genomics.gnomad_cache import GnomadRegionCache, tiles_for_region
+    calls = []
+    def execute(_query, variables):
+        interval = (variables['start'], variables['stop'])
+        calls.append(interval)
+        if interval == (1,25000):
+            raise HTTPError('https://example.test',500,'internal',None,None)
+        if interval == (12501,25000):
+            raise HTTPError('https://example.test',400,'invalid',None,None)
+        return {'data':{'region':{'variants':[]}}}
+    monkeypatch.setattr(gnomad, 'execute_graphql', execute)
+    disable_retry_wait(monkeypatch)
+    cache = GnomadRegionCache(tmp_path, fetcher=gnomad.fetch_region_variants_recursive)
+    with pytest.raises(HTTPError, match='400'):
+        cache.fetch_region('1',1,25000)
+    assert calls == [(1,25000),(1,25000),(1,12500),(12501,25000)]
+    assert cache.read_cached_tile(tiles_for_region('1',1,25000)[0]) is None
+    assert not list(tmp_path.rglob('*.json.gz'))
+
+
+@pytest.mark.parametrize('status', [429,503,500])
+def test_repeated_service_error_does_not_subdivide(status, monkeypatch):
+    calls = []
+    def execute(_query, variables):
+        calls.append((variables['start'],variables['stop']))
+        raise HTTPError('https://example.test',status,'rate limit' if status == 500 else 'unavailable',None,None)
+    monkeypatch.setattr(gnomad, 'execute_graphql', execute)
+    disable_retry_wait(monkeypatch)
+    with pytest.raises(HTTPError):
+        gnomad.fetch_region_variants_recursive('1',1,25000,max_attempts=3)
+    assert calls == [(1,25000)] * 3
+
+
+def test_persistent_500_stops_subdivision_at_minimum(monkeypatch):
+    calls = []
+    def execute(_query, variables):
+        calls.append((variables['start'],variables['stop']))
+        raise HTTPError('https://example.test',500,'internal',None,None)
+    monkeypatch.setattr(gnomad, 'execute_graphql', execute)
+    disable_retry_wait(monkeypatch)
+    with pytest.raises(HTTPError):
+        gnomad.fetch_region_variants_recursive('1',1,1000,max_attempts=2)
+    assert calls == [(1,1000),(1,1000),(1,500),(1,500)]
+
+
+def test_single_500_retries_original_region_without_splitting(monkeypatch):
+    calls = []
+    def execute(_query, variables):
+        calls.append((variables['start'],variables['stop']))
+        if len(calls) == 1:
+            raise HTTPError('https://example.test',500,'internal',None,None)
+        return SUCCESS_RESPONSE
+    monkeypatch.setattr(gnomad, 'execute_graphql', execute)
+    disable_retry_wait(monkeypatch)
+    assert gnomad.fetch_region_variants_recursive('1',1,25000) == SUCCESS_RESPONSE['data']['region']['variants']
+    assert calls == [(1,25000),(1,25000)]
+
+
 def test_region_limit_at_minimum_window_remains_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     def execute(_query, _variables):
         return {"errors": [{"message": "Select a smaller region"}], "data": None}

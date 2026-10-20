@@ -42,8 +42,6 @@ def run_reannotation(*, root: Path, archive_root: str, output_remote: str | None
             raise ValueError("Reannotation progress plan changed")
     else:
         state = copy.deepcopy(load_snapshot(parent)) if parent else empty_state()
-        if not state["sources"].keys() <= set(run_ids):
-            raise ValueError("Run IDs must include all source runs bound by the parent snapshot")
         if parent and parent.parent.parent.resolve() != root.resolve():
             raise ValueError("Parent snapshot must belong to the same object store")
         state["plan"] = plan
@@ -67,6 +65,12 @@ def run_reannotation(*, root: Path, archive_root: str, output_remote: str | None
         print(f"Planned {run_id}: failed_regions={len(source['regions'])}; tiles={len(source['tiles'])}", flush=True)
     force = {tile_key(tile) for spec in refresh
              for tile in tiles_for_region(spec.split(":")[0], *map(int, spec.split(":")[1].split("-")))}
+    selected_tiles = {key for run_id in run_ids for key in state["sources"][run_id]["tiles"]}
+    needed_tiles = {key for source in state["sources"].values() for key in source["tiles"]}
+    if needed_tiles - state["tiles"].keys() - selected_tiles:
+        raise ValueError("Run IDs must cover every pending tile in the parent snapshot")
+    if not force <= selected_tiles:
+        raise ValueError("Refresh regions must belong to selected source runs")
     # Refreshed observations use a separate resume cache; old observations survive.
     refresh_cache = GnomadRegionCache(root / "work" / f"refresh-{plan_id}") if force else cache
     attempts = 0

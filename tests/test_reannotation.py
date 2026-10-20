@@ -271,6 +271,33 @@ def test_pipeline_retries_pending_tile_without_refetching_success(tmp_path, monk
     assert calls == [1, 25001, 25001]
 
 
+def test_focused_resume_preserves_complete_unselected_batches(tmp_path, archived):
+    remote, binding, _ = archived
+    root = tmp_path / 'store'
+    state, _ = make_snapshot(root, binding, {binding['tiles'][0]:([record()],WINDOW)})
+    state['sources']['batch_002'] = {**binding, 'run_id':'batch_002', 'tiles':[binding['tiles'][0]]}
+    parent = publish(root,state,PROVENANCE)
+    calls = []
+    def fetch(chrom,start,end,**kwargs):
+        calls.append(start)
+        return []
+    remote.downloads.clear()
+    result = run_reannotation(root=root,archive_root='drive:GAPH',output_remote=None,
+        run_ids=['batch_001'],client=remote,cache=GnomadRegionCache(tmp_path/'cache',fetcher=fetch),
+        provenance=PROVENANCE,parent=parent)
+    value = load_snapshot(result)
+    assert value['complete'] and len(value['sources']) == 2
+    assert value['tiles'][binding['tiles'][0]] == state['tiles'][binding['tiles'][0]]
+    assert calls == [25001,50001]
+    assert all('/batch_001/' in name for name in remote.downloads)
+    state['sources']['batch_002']['tiles'] = ['1:75001:100000']
+    missing = publish(root,state,PROVENANCE)
+    with pytest.raises(ValueError,match='every pending tile'):
+        run_reannotation(root=root,archive_root='drive:GAPH',output_remote=None,
+            run_ids=['batch_001'],client=remote,cache=GnomadRegionCache(tmp_path/'cache',fetcher=fetch),
+            provenance=PROVENANCE,parent=missing)
+
+
 def test_shared_pacing_and_retry_after(tmp_path, monkeypatch):
     from genomics import gnomad_transport as transport
     monkeypatch.setenv('GAPH_GNOMAD_RATE_STATE', str(tmp_path / 'pacing.json'))
