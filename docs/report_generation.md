@@ -111,6 +111,13 @@ candidate conservation calculations. Scientific source identity is preserved.
 In discard mode, support-filter calculations also operate on genomic blocks
 without writing the large all-allele filter-score table.
 
+Prepared source packs accumulate for the entire selected cohort and are released
+only after a successful report. Size the allocation for all packs, the current
+restored source, preparation and calculation spill, the selected supplement,
+and a reserve. Before each restore the loader requires room in its workspace
+budget for twice that archive's bytes in addition to everything already staged;
+this admission check is not a measurement of peak disk use or user quota.
+
 `--cache-policy keep` is the default for both source modes. `discard` uses a
 separate owned workspace for newly calculated caches and large intermediate
 tables, releases it after a successful report, and preserves checkpoints after
