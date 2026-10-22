@@ -49,7 +49,7 @@ VARIANT_USECOLS = [
     "vep_transcript_id",
     "vep_mane_select",
 ]
-SUMMARY_CACHE_VERSION = 19
+SUMMARY_CACHE_VERSION = 20
 SUMMARY_CACHE_NAME = "variant_summary.json.gz"
 SPECIAL_FLOAT_KEY = "__gaph_float__"
 ORTHOLOG_EVIDENCE_COLUMNS = [
@@ -122,6 +122,7 @@ class VariantSummary:
     consequence_counts: pd.DataFrame
     pathogenic_consequence_counts: pd.DataFrame
     pathogenic_rows: pd.DataFrame
+    pathogenic_context_rows: pd.DataFrame
     pathogenic_support_rows: pd.DataFrame
     ortholog_evidence_cells: pd.DataFrame
     ortholog_evidence_distributions: pd.DataFrame
@@ -223,6 +224,7 @@ def _summary_payload(
         "consequence_counts",
         "pathogenic_consequence_counts",
         "pathogenic_rows",
+        "pathogenic_context_rows",
         "pathogenic_support_rows",
         "ortholog_evidence_cells",
         "ortholog_evidence_distributions",
@@ -307,6 +309,7 @@ def _summary_from_payload(payload: dict[str, object]) -> VariantSummary:
         consequence_counts=_frame_from_payload(frames["consequence_counts"]),
         pathogenic_consequence_counts=_frame_from_payload(frames["pathogenic_consequence_counts"]),
         pathogenic_rows=_frame_from_payload(frames["pathogenic_rows"]),
+        pathogenic_context_rows=_frame_from_payload(frames["pathogenic_context_rows"]),
         pathogenic_support_rows=_frame_from_payload(frames["pathogenic_support_rows"]),
         ortholog_evidence_cells=_frame_from_payload(frames["ortholog_evidence_cells"]),
         ortholog_evidence_distributions=_frame_from_payload(
@@ -858,6 +861,7 @@ def _summary_from_grouped_aggregation(
         consequence_counts=consequence_counts,
         pathogenic_consequence_counts=pathogenic_consequence_counts,
         pathogenic_rows=pathogenic_rows,
+        pathogenic_context_rows=grouped.pathogenic_context_rows,
         pathogenic_support_rows=pathogenic_support_rows,
         ortholog_evidence_cells=ortholog_cells,
         ortholog_evidence_distributions=ortholog_distributions,

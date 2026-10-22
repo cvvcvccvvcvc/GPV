@@ -183,9 +183,28 @@ silently leaving a pending result.
 ### Pathogenic ClinVar Hits
 
 Pathogenic and likely-pathogenic subtypes remain distinct in detail tables but
-are combined in plots. The tab owns review-strength, molecular-effect,
-condition, exact-support, and complete paginated detail views; other tabs do
-not repeat them.
+are combined in plots. `By strategy` preserves separate strategy groups.
+`All strategies · Union` counts each normalized allele once and offers two
+independent minimum-support filters, initially 6 orthologs and 2 strategies.
+Enabled filters combine with AND; variant type applies to every chart and QC.
+Ortholog support is the maximum in one gene–strategy context, never a sum.
+Strategy support counts distinct calling strategies. The joint rule requires
+six orthologs in at least one context and calls from at least two strategies,
+not six orthologs in each strategy. These are exploratory stability filters,
+not independent biological replications or calibrated benignity thresholds.
+
+The compact P/LP payload retains allele–gene consequence rows with their own
+strategy memberships and allele–condition memberships. Client-side filtering
+updates counts, consequences, support and conditions together, without reading
+candidate archives. Consequences count allele–gene observations, including in
+Union; other counts use distinct alleles. The summary cache version changes
+when this retained relation changes; incompatible cached summaries are rebuilt.
+
+QC owns the complete paginated `Variant details` table. Its selection is shared
+with this tab, with a visible filter description, reset and return link. The
+TSV download always contains the complete unfiltered P/LP set. Alleles without
+named conditions remain in denominators; an empty selection has undefined
+fractions, not zero fractions.
 
 Exact-support distributions count one SNV per strategy. When an allele has
 several target-gene contexts, the row with maximum ALT-supporting ortholog count
@@ -199,6 +218,8 @@ phyloP availability does not restrict this tab.
 
 Conditions compare unique pathogenic/likely-pathogenic alleles with either
 ClinVar alleles in eligible target genes or the complete pinned GRCh38 VCF.
+Union uses the union of the original eligible genes; support filters never
+shrink this background to the genes of retained hits.
 Both arms use the selected variant type. Denominators include alleles without a
 named condition, and one allele may contribute several conditions, so displayed
 fractions need not sum to one. Disease identity prefers MedGen, then MONDO, then

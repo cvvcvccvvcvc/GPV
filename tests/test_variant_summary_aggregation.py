@@ -84,7 +84,7 @@ def test_prepared_blocks_preserve_global_memberships_and_af_quantiles(tmp_path: 
     ) for path in (annotations, prepared / "manifest.json")]
     assert results[0].masks == results[1].masks
     assert results[0].gene_count == results[1].gene_count
-    for name in ("global_groups", "allele_gene_groups", "gnomad_af_summary", "pathogenic_rows"):
+    for name in ("global_groups", "allele_gene_groups", "gnomad_af_summary", "pathogenic_rows", "pathogenic_context_rows"):
         pd.testing.assert_frame_equal(
             getattr(results[0], name), getattr(results[1], name), rtol=1e-15, atol=1e-15,
         )
@@ -403,6 +403,10 @@ def test_allele_evidence_is_reconciled_independently_of_row_order(
         results[1].allele_gene_groups,
     )
     pd.testing.assert_frame_equal(results[0].pathogenic_rows, results[1].pathogenic_rows)
+    pd.testing.assert_frame_equal(results[0].pathogenic_context_rows, results[1].pathogenic_context_rows)
+    contexts = results[0].pathogenic_context_rows.set_index("gene_id")
+    assert contexts.loc["gene_a", "consequence"] == "intron_variant"
+    assert contexts.loc["gene_b", "consequence"] == "missense_variant"
 
 
 def test_duckdb_clinvar_categories_match_shared_semantics(tmp_path: Path) -> None:

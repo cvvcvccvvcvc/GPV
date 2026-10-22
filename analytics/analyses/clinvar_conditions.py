@@ -185,6 +185,15 @@ def compare_condition_distributions(
     candidate["strategy"] = candidate["strategies"].str.split(",")
     candidate = candidate.explode("strategy")
     candidate["strategy"] = candidate["strategy"].str.strip()
+    # Union keeps the original eligible-gene background, regardless of UI filters.
+    eligible_gene_ids_by_strategy = {
+        **eligible_gene_ids_by_strategy,
+        "union": set().union(*eligible_gene_ids_by_strategy.values()),
+    }
+    candidate = pd.concat([
+        candidate,
+        candidate.drop_duplicates("variant_key").assign(strategy="union"),
+    ], ignore_index=True)
     global_all = global_counts.groupby(["condition_key", "condition"], as_index=False)[
         "variant_count"
     ].sum()

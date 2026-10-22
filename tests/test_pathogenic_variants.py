@@ -8,6 +8,7 @@ import pandas as pd
 from analytics.analyses.pathogenic_variants import build_pathogenic_variant_analysis
 from analytics.reporting.pathogenic_variants import (
     build_pathogenic_variant_sections,
+    build_pathogenic_qc_sections,
     pathogenic_condition_view,
     pathogenic_support_figure,
 )
@@ -103,6 +104,10 @@ def test_pathogenic_analysis_builds_condition_backgrounds_and_unique_snv_support
     )
     summary = SimpleNamespace(
         pathogenic_rows=pathogenic_rows,
+        pathogenic_context_rows=pd.DataFrame([
+            {"variant_key": "1:100:A>G", "gene_id": "1", "consequence": "missense_variant", "strategies": "s1,s2"},
+            {"variant_key": "1:200:A>AT", "gene_id": "2", "consequence": "inframe_insertion", "strategies": "s1"},
+        ]),
         pathogenic_variant_count=2,
         pathogenic_support_rows=support_rows,
         pathogenic_consequence_counts=pd.DataFrame(
@@ -167,7 +172,10 @@ def test_pathogenic_analysis_builds_condition_backgrounds_and_unique_snv_support
     assert len(exported) == 2
     rendered = "".join(build_pathogenic_variant_sections(analysis))
     assert "Pathogenic ClinVar Hits" in rendered
-    assert "Primary sort" in rendered
+    assert "Primary sort" not in rendered
+    qc = "".join(build_pathogenic_qc_sections(analysis))
+    assert "Primary sort" in qc
+    assert "pathogenic-selection-change" in qc
     assert "Disease one" in rendered
     assert 'data-role="sort"' in rendered
     assert "Absolute GAPH − ClinVar difference" in rendered
@@ -176,6 +184,9 @@ def test_pathogenic_analysis_builds_condition_backgrounds_and_unique_snv_support
     assert "Supporting orthologs among P/LP hits" in rendered
     assert "SNV support rows plotted" not in rendered
     assert "phyloP100way" not in rendered
+    assert 'value="6"' in rendered
+    assert 'value="2"' in rendered
+    assert "All strategies · Union" in rendered
     from analytics.reporting.document import render_html
 
     (tmp_path / "pathogenic_smoke.html").write_text(
@@ -186,6 +197,7 @@ def test_pathogenic_analysis_builds_condition_backgrounds_and_unique_snv_support
                     "Pathogenic ClinVar Hits",
                     build_pathogenic_variant_sections(analysis),
                 ),
+                ("qc", "QC", build_pathogenic_qc_sections(analysis)),
             ]
         )
     )
@@ -302,3 +314,130 @@ def test_pathogenic_conditions_offer_all_requested_sort_orders() -> None:
     assert 'value="absolute-difference"' in rendered
     assert "const sortScore" in rendered
     assert "pathogenic-clinvar-distribution-plot" not in rendered
+
+
+def test_browser_cohort_boundaries_union_contexts_and_fixed_background() -> None:
+    """Exercise the actual client calculation, including the two independent filters."""
+    import json
+    import subprocess
+
+    script = Path('analytics/reporting/pathogenic_variants.js').read_text()
+    assertions = r'''
+    const variants = [
+      ['a', 5, ['s1'], 'snv'], ['b', 6, ['s1'], 'indel'],
+      ['c', 5, ['s1','s2'], 'snv'], ['d', 6, ['s1','s2'], 'snv'],
+      ['e', 7, ['s1','s2'], 'snv'], ['f', null, ['s1','s2'], 'snv'],
+    ].map(([key,support,strategies,type]) => ({key,support,strategies,type,stars:'2',
+      conditions:key==='d' ? [{key:'C1',name:'Disease'}] : []}));
+    const config = {variants, strategies:[{key:'s1'},{key:'s2'}], starOrder:['2'],
+      contexts:[
+        {key:'d',gene:'g1',group:'Missense',strategies:['s1','s2']},
+        {key:'d',gene:'g2',group:'Intronic',strategies:['s2']},
+      ], support:[
+        {variant_key:'d',gene_id:'g1',strategy:'s1',alt_support_ortholog_count:6},
+        {variant_key:'d',gene_id:'g1',strategy:'s2',alt_support_ortholog_count:2},
+      ], background:[{strategy:'union',cohort:'target',variant_type:'all',condition_key:'C1',
+        condition:'Disease',variant_count:4,total_variant_count:10}]};
+    const state={view:'union',type:'all',orthologEnabled:false,orthologMin:6,strategyEnabled:false,strategyMin:2};
+    const keys=s => PathogenicView.select(config,s).map(r=>r.key);
+    const both={...state,orthologEnabled:true,strategyEnabled:true};
+    const summary=PathogenicView.summarize(config,both);
+    const conditions=PathogenicView.conditions(config,both,'s1','target');
+    console.log(JSON.stringify({
+      all:keys(state),ortholog:keys({...state,orthologEnabled:true}),
+      strategies:keys({...state,strategyEnabled:true}),both:keys(both),
+      byStrategy:keys({...both,view:'strategy'}),
+      higher:keys({...both,orthologMin:7}),empty:keys({...both,strategyMin:3}),
+      indel:keys({...state,type:'indel'}),
+      stars:summary.stars.get('union').get('2'),
+      consequences:[...summary.consequences.get('union')],
+      support:[...summary.support.get('union').values()].map(r=>r.alt_support_ortholog_count),
+      conditionTotal:conditions.total,conditionCount:conditions.observed.get('C1').count,
+      backgroundTotal:conditions.background.get('C1').total,
+    }));
+    '''
+    completed = subprocess.run(
+        ['node', '-e', 'const document={addEventListener(){}};\n' + script + assertions],
+        check=True, text=True, capture_output=True,
+    )
+    result = json.loads(completed.stdout)
+    assert result == {
+        'all': ['a','b','c','d','e','f'], 'ortholog': ['b','d','e'],
+        'strategies': ['c','d','e','f'], 'both': ['d','e'],
+        'byStrategy': ['a','b','c','d','e','f'], 'higher': ['e'], 'empty': [],
+        'indel': ['b'], 'stars': 2, 'consequences': [['Missense',1],['Intronic',1]],
+        'support': [6], 'conditionTotal': 2, 'conditionCount': 1, 'backgroundTotal': 10,
+    }
+
+
+def test_pathogenic_filtered_report_smoke(tmp_path: Path) -> None:
+    """Small offline summary → P/LP analysis → complete HTML smoke, with five genes."""
+    from analytics.analyses.variant_summary import VARIANT_USECOLS, build_variant_summary
+    from analytics.reporting.document import render_html
+    import json
+    import re
+
+    derived = tmp_path / 'derived'
+    reports = tmp_path / 'reports'
+    derived.mkdir()
+    reports.mkdir()
+    rows, support, universe, vcf_rows = [], [], [], []
+    cases = [
+        (100,'A','G','1',5,'s1'), (200,'C','T','1',6,'s1,s2'),
+        (300,'G','A','2',7,'s2'), (400,'A','AT','2',6,'s1,s2'),
+        (500,'C','G','3',3,'s1,s2'), (600,'T','C','4',12,'s1,s2'),
+    ]
+    for pos, ref, alt, gene, count, strategies in cases:
+        key = f'1:{pos}:{ref}>{alt}'
+        event = 'snv' if len(alt) == 1 else 'ins'
+        disease = 'not_provided' if pos == 500 else f'Demo_condition_{gene}'
+        ids = '.' if pos == 500 else f'MedGen:DEMO{gene}'
+        rows.append({**dict.fromkeys(VARIANT_USECOLS,''),
+            'variant_key':key,'gene_id':gene,'event_type':event,'ref':ref,'alt':alt,
+            'strategies':strategies,'lookup_status':'ok','clinvar_sig':'Pathogenic',
+            'clinvar_id':f'DEMO{pos}','clinvar_allele_id':str(pos),
+            'clinvar_review_stars':'2','clinvar_scv_count':'3','vep_status':'ok',
+            'vep_primary_consequence':'missense_variant' if event=='snv' else 'frameshift_variant',
+        })
+        for strategy in strategies.split(','):
+            support.append({'variant_key':key,'gene_id':gene,'strategy':strategy,
+                'alt_support_row_count':count,'alt_support_ortholog_count':count,
+                'alt_support_family_count':2,'site_aligned_ortholog_count':20})
+        universe.append({'variant_key':key,'gene_ids':gene,'variant_type':'snv' if event=='snv' else 'indel',
+            'label_class':'pathogenic','clinvar_disease_names':disease,'clinvar_disease_ids':ids})
+        vcf_rows.append(f'1\t{pos}\t{pos}\t{ref}\t{alt}\t.\t.\tCLNSIG=Pathogenic;CLNDN={disease};CLNDISDB={ids}\n')
+    # A second gene-context for the same allele must not double-count its stars or conditions.
+    rows.append({**rows[-1], 'gene_id':'5','strategies':'s2','vep_primary_consequence':'intron_variant'})
+    support.append({**support[-1], 'gene_id':'5','strategy':'s2','alt_support_ortholog_count':2})
+    universe[-1]['gene_ids'] = '4|5'
+    annotation = tmp_path / 'variant_annotations.tsv.gz'
+    pd.DataFrame(rows).to_csv(annotation,sep='\t',index=False)
+    support_path = tmp_path / 'support.tsv.gz'
+    pd.DataFrame(support).to_csv(support_path,sep='\t',index=False)
+    ortholog_path = tmp_path / 'ortholog.tsv.gz'
+    pd.DataFrame(columns=['strategy','target_context','taxonomic_scope','evidence_unit',
+        'site_aligned_count','alt_support_count','gnomad_found_count','gnomad_not_found_count',
+        'gnomad_lookup_failed_count']).to_csv(ortholog_path,sep='\t',index=False)
+    kwargs = dict(strategy_label=str, variant_strategy_support_path=support_path,
+                  ortholog_evidence_summary_path=ortholog_path)
+    summary = build_variant_summary(annotation, derived, **kwargs)
+    cached = build_variant_summary(annotation, derived, **kwargs)
+    assert cached.cache_hit
+    pd.testing.assert_frame_equal(summary.pathogenic_context_rows,cached.pathogenic_context_rows)
+    assert len(summary.pathogenic_context_rows) == 7
+    vcf = tmp_path / 'clinvar.vcf'
+    vcf.write_text('##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n'+''.join(vcf_rows))
+    analysis = build_pathogenic_variant_analysis(summary=summary,clinvar_universe=pd.DataFrame(universe),
+        clinvar_vcf=vcf,condition_cache_dir=tmp_path/'cache',
+        eligible_gene_ids_by_strategy={'s1':{'1','2','3','4'},'s2':{'1','2','3','4','5'}},analytics_dir=derived)
+    content = render_html([
+        ('pathogenic-clinvar-hits','Pathogenic ClinVar Hits',[
+            '<p class="analysis-note">OFFLINE SMOKE · Synthetic test data: 5 genes, 6 P/LP alleles. This is not a scientific result.</p>',
+            *build_pathogenic_variant_sections(analysis)]),
+        ('qc','QC',build_pathogenic_qc_sections(analysis)),
+    ])
+    config = json.loads(re.search(r'<script type="application/json" id="pathogenic-data">(.*?)</script>',content,re.S)[1])
+    assert len(config['variants']) == 6
+    assert len(config['contexts']) == 7
+    assert len([r for r in config['variants'] if r['support']>=6 and len(r['strategies'])>=2]) == 3
+    (reports/'pathogenic_smoke.html').write_text(content)

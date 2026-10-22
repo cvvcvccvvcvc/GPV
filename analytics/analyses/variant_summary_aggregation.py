@@ -119,6 +119,7 @@ class VariantGroupedAggregation:
     allele_gene_groups: pd.DataFrame
     gnomad_af_summary: pd.DataFrame
     pathogenic_rows: pd.DataFrame
+    pathogenic_context_rows: pd.DataFrame
     timings: dict[str, float]
     diagnostics: dict[str, object]
 
@@ -342,6 +343,15 @@ def aggregate_variant_groups(
             "FROM allele_gene_rows GROUP BY ALL ORDER BY ALL"
         ).fetchdf()
         timings["allele_gene_aggregates"] = time.perf_counter() - started
+        pathogenic_context_rows = connection.execute(
+            "SELECT variant_id AS variant_key, gene_id, consequence, strategy_mask "
+            "FROM allele_gene_rows WHERE clinvar_category = 'P/LP' "
+            "ORDER BY variant_id, gene_id"
+        ).fetchdf()
+        pathogenic_context_rows["strategies"] = [
+            ",".join(s for i, s in enumerate(strategies) if int(mask) & (1 << i))
+            for mask in pathogenic_context_rows.pop("strategy_mask")
+        ]
         connection.execute("DROP TABLE allele_gene_rows")
 
         started = time.perf_counter()
@@ -380,6 +390,7 @@ def aggregate_variant_groups(
             allele_gene_groups=allele_gene_groups,
             gnomad_af_summary=gnomad_af_summary,
             pathogenic_rows=pathogenic_rows,
+            pathogenic_context_rows=pathogenic_context_rows,
             timings=timings,
             diagnostics=diagnostics,
         )
@@ -454,6 +465,7 @@ def _aggregate_prepared_groups(source: VariantAggregationSource, **kwargs) -> Va
         consequence_source="Ensembl VEP", gene_count=gene_count,
         global_groups=merged_counts("global_groups"), allele_gene_groups=merged_counts("allele_gene_groups"),
         gnomad_af_summary=pd.DataFrame(rows), pathogenic_rows=pathogenic, timings=dict(timings),
+        pathogenic_context_rows=pd.concat([r.pathogenic_context_rows for r in results], ignore_index=True),
         diagnostics={"engine": "duckdb", "prepared_block_count": len(results),
                      "peak_block_temp_bytes": max(r.diagnostics.get("temp_storage_bytes_after_materialization", 0) or 0 for r in results)},
     )

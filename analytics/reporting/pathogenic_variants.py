@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+from pathlib import Path
 from urllib.parse import quote
 
 import numpy as np
@@ -12,12 +13,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from analytics.analyses.pathogenic_variants import PathogenicVariantAnalysis
+from analytics.vep.consequences import display_consequence_group
 from .components import (
     compact_figure,
     dataframe_records,
     fig_html,
-    format_int,
-    metric_cards,
     strategy_label,
 )
 from .config import (
@@ -33,43 +33,93 @@ MAX_VISIBLE_SUPPORT_POINTS = 250
 
 
 def build_pathogenic_variant_sections(analysis: PathogenicVariantAnalysis) -> list[str]:
-    variants = analysis.variants
-    if variants.empty:
-        return ["<h2>Pathogenic ClinVar Hits</h2>", "<p>No P/LP candidate alleles were found.</p>"]
-    stars = pd.to_numeric(variants["clinvar_review_stars"], errors="coerce")
-    named = analysis.condition_counts
-    named = named[named["cohort"].eq("gaph") & named["variant_count"].gt(0)]
-    sections = [
-        "<h2>Pathogenic ClinVar Hits</h2>",
-        metric_cards(
-            [
-                ("Unique P/LP alleles", format_int(len(variants))),
-                ("With ≥2 review stars", format_int(stars.ge(2).sum())),
-                ("Named conditions", format_int(named["condition_key"].nunique())),
-            ]
-        ),
-    ]
-    for title, figure in (
-        ("ClinVar review stars", pathogenic_star_figure(analysis.star_counts)),
-        ("Molecular effect", pathogenic_consequence_figure(analysis.consequence_counts)),
-        ("Supporting orthologs among P/LP hits", pathogenic_support_figure(analysis.support_rows)),
-    ):
-        sections.extend(
-            [
-                f"<h3>{title}</h3>",
-                fig_html(figure) if figure is not None else "<p>No eligible observations.</p>",
-            ]
+    """Embed only the compact P/LP cohort; filtering never reads candidate archives."""
+    memberships = {}
+    for row in analysis.condition_memberships.itertuples(index=False):
+        memberships.setdefault(row.variant_key, []).append(
+            {"key": row.condition_key, "name": row.condition}
         )
-    sections.extend(
-        [
-            "<h3>Associated conditions</h3>",
-            pathogenic_condition_view(analysis.condition_counts),
-            "<h3>Variant details</h3>",
-            f'<p><a download href="../derived/{quote(analysis.variants_path.name)}">Download complete P/LP TSV</a></p>',
-            pathogenic_variant_table_html(variants),
-        ]
-    )
-    return sections
+    variants = []
+    for row in dataframe_records(analysis.variants):
+        variants.append({
+            "key": row["variant_key"],
+            "type": "snv" if row["event_type"] == "snv" else "indel",
+            "strategies": sorted({s.strip() for s in row["strategies"].split(",") if s.strip()}),
+            "support": row["support_ortholog_max"],
+            "stars": str(row["clinvar_review_stars"]),
+            "conditions": memberships.get(row["variant_key"], []),
+        })
+    contexts = []
+    for row in dataframe_records(analysis.context_rows):
+        contexts.append({
+            "key": row["variant_key"], "gene": row["gene_id"],
+            "strategies": sorted({s.strip() for s in row["strategies"].split(",") if s.strip()}),
+            "group": display_consequence_group(row["consequence"]),
+        })
+    config = {
+        "variants": variants, "contexts": contexts,
+        "support": dataframe_records(analysis.support_rows),
+        "background": dataframe_records(analysis.condition_counts),
+        "strategies": [{"key": s, "label": strategy_label(s)} for s in sorted(
+            {s for row in variants for s in row["strategies"]}, key=strategy_label)],
+        "starOrder": REVIEW_STAR_ORDER, "starColors": REVIEW_STAR_COLORS,
+        "consequenceOrder": CONSEQUENCE_GROUP_ORDER,
+        "consequenceColors": CONSEQUENCE_GROUP_COLORS,
+    }
+    payload = json.dumps(config, ensure_ascii=False, allow_nan=False, separators=(",", ":")).replace("</", "<\\/")
+    script = Path(__file__).with_suffix(".js").read_text()
+    return ["""
+    <h2>Pathogenic ClinVar Hits</h2>
+    <div class="analysis-controls" id="pathogenic-controls">
+      <label>View<select data-role="view"><option value="strategy">By strategy</option><option value="union">All strategies · Union</option></select></label>
+      <label>Variant type<select data-role="type"><option value="all">SNV + INDEL</option><option value="snv">SNV</option><option value="indel">INDEL</option></select></label>
+      <div id="pathogenic-union-filters" hidden>
+        <label><input type="checkbox" data-role="ortholog-enabled" checked> Minimum supporting orthologs</label>
+        <input type="number" data-role="ortholog-min" aria-label="Minimum supporting orthologs" min="1" step="1" value="6">
+        <label><input type="checkbox" data-role="strategy-enabled" checked> Minimum supporting strategies</label>
+        <input type="number" data-role="strategy-min" aria-label="Minimum supporting strategies" min="1" step="1" value="2">
+      </div>
+    </div>
+    <p id="pathogenic-selection" role="status" aria-live="polite"></p>
+    <div class="pathogenic-actions"><button type="button" data-pathogenic-reset>Reset filters</button>
+      <button type="button" id="pathogenic-open-qc">View selected variants in QC</button></div>
+    <p class="analysis-note">Union counts each normalized allele once. Ortholog support is the maximum in one gene–strategy context, never a sum across strategies. Both enabled filters must pass; the ortholog threshold need only pass in one context. Strategy agreement is not independent biological replication.</p>
+    <div class="metric-grid" id="pathogenic-metrics"></div>
+    <h3>ClinVar review stars</h3><div id="pathogenic-stars" class="analysis-plot"></div>
+    <h3>Molecular effect</h3><div id="pathogenic-consequences" class="analysis-plot"></div>
+    <h3>Supporting orthologs among P/LP hits</h3><p>SNVs only; one observation per allele and displayed group. Counts use a logarithmic axis.</p>
+    <div id="pathogenic-support" class="analysis-plot"></div>
+    <h3>Associated conditions</h3>
+    <div class="analysis-controls" id="pathogenic-condition-controls">
+      <label>Strategy<select data-role="strategy"></select></label>
+      <label>ClinVar background<select data-role="background"><option value="target">Matching target regions</option><option value="global">Whole GRCh38 VCF</option></select></label>
+      <label>Sort conditions by<select data-role="sort"><option value="gaph">GAPH fraction</option><option value="clinvar">ClinVar fraction</option><option value="absolute-difference">Absolute GAPH − ClinVar difference</option></select></label>
+      <label>Find condition<input data-role="search" type="search" placeholder="Condition name"></label>
+    </div>
+    <p>Fractions include alleles without a named condition. An allele may have multiple conditions. The target background uses the original eligible genes and does not shrink with support filters.</p>
+    <div id="pathogenic-conditions-plot" class="analysis-plot"></div>
+    <details><summary>Interpretation of cross-species evidence</summary><p>An ALT allele observed in another species does not establish benignity in humans. Selection reflects effects on survival and reproduction; late-onset and incompletely penetrant disease risks may therefore be poorly captured. Species differ in life history, environment and genetic background, including compensatory changes. These limitations do not make late-onset disorders or cancer predisposition non-pathogenic. See <a href="https://doi.org/10.1016/0022-5193(66)90184-6">Hamilton (1966)</a> and <a href="https://doi.org/10.1073/pnas.232565499">Kondrashov et al. (2002)</a>.</p></details>
+    <style>
+      #pathogenic-controls {grid-template-columns: minmax(180px,240px) minmax(180px,240px) minmax(260px,400px);max-width:1000px}
+      #pathogenic-union-filters:not([hidden]) {display:grid;grid-template-columns:1fr 72px;gap:8px;align-items:center}
+      #pathogenic-union-filters input[type=number] {width:60px;padding:6px;border:1px solid #cbd2d9;border-radius:4px}
+      .pathogenic-actions {display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+      .pathogenic-actions button {padding:7px 12px;border:1px solid #cbd2d9;border-radius:4px;background:white;cursor:pointer}
+      #pathogenic-condition-controls input {padding:7px;max-width:100%;box-sizing:border-box}
+      @media(max-width:760px) {#pathogenic-controls,#pathogenic-condition-controls {grid-template-columns:1fr}}
+    </style>
+    """, '<script type="application/json" id="pathogenic-data">' + payload + '</script>',
+        '<script>' + script + '</script>']
+
+
+def build_pathogenic_qc_sections(analysis: PathogenicVariantAnalysis) -> list[str]:
+    return [
+        '<h3 id="pathogenic-qc-cases">Pathogenic ClinVar cases · Variant details</h3>',
+        '<p id="pathogenic-qc-selection" role="status" aria-live="polite">All P/LP alleles</p>',
+        '<div class="pathogenic-actions"><button type="button" id="pathogenic-edit-filters">Edit filters in Pathogenic ClinVar Hits</button><button type="button" data-pathogenic-reset>Reset filters</button></div>',
+        f'<p><a download href="../derived/{quote(analysis.variants_path.name)}">Download complete P/LP TSV (all variants, unfiltered)</a></p>',
+        pathogenic_variant_table_html(analysis.variants),
+    ]
 
 
 def pathogenic_star_figure(counts: pd.DataFrame):
@@ -376,6 +426,7 @@ def pathogenic_variant_table_html(variants: pd.DataFrame) -> str:
       const columns = {columns_json};
       const pageSize = 100;
       let page = 0;
+      let selectedKeys = null;
       const tableBody = document.querySelector('#pathogenic-variant-table tbody');
       const primary = document.getElementById('pathogenic-primary-sort');
       const primaryDirection = document.getElementById('pathogenic-primary-direction');
@@ -412,7 +463,7 @@ def pathogenic_variant_table_html(variants: pd.DataFrame) -> str:
       }}
 
       function sortedRows() {{
-        return rows.map((row, index) => ({{row, index}})).sort((left, right) => {{
+        return rows.filter(row => selectedKeys === null || selectedKeys.has(row.Key)).map((row, index) => ({{row, index}})).sort((left, right) => {{
           let result = compareValues(left.row, right.row, primary.value, primaryDirection.value);
           if (!result && secondary.value && secondary.value !== primary.value) {{
             result = compareValues(
@@ -459,6 +510,11 @@ def pathogenic_variant_table_html(variants: pd.DataFrame) -> str:
       }});
       previous.addEventListener('click', () => {{ if (page > 0) {{ page -= 1; render(); }} }});
       next.addEventListener('click', () => {{ page += 1; render(); }});
+      document.addEventListener('pathogenic-selection-change', event => {{
+        selectedKeys = new Set(event.detail.keys);
+        page = 0;
+        render();
+      }});
       render();
     }})();
     </script>

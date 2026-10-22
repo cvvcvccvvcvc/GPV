@@ -55,6 +55,8 @@ class PathogenicVariantAnalysis:
     consequence_counts: pd.DataFrame
     condition_counts: pd.DataFrame
     support_rows: pd.DataFrame
+    context_rows: pd.DataFrame
+    condition_memberships: pd.DataFrame
 
 
 def build_pathogenic_variant_analysis(
@@ -80,6 +82,8 @@ def build_pathogenic_variant_analysis(
             consequence_counts=summary.pathogenic_consequence_counts.copy(),
             condition_counts=pd.DataFrame(),
             support_rows=pd.DataFrame(),
+            context_rows=summary.pathogenic_context_rows.copy(),
+            condition_memberships=pd.DataFrame(columns=["variant_key", "condition_key", "condition"]),
         )
 
     source = source[source["clinvar_category"].astype(str).eq("P/LP")].copy()
@@ -208,6 +212,8 @@ def build_pathogenic_variant_analysis(
         consequence_counts=summary.pathogenic_consequence_counts.copy(),
         condition_counts=condition_counts,
         support_rows=support_rows,
+        context_rows=summary.pathogenic_context_rows.copy(),
+        condition_memberships=memberships[["variant_key", "condition_key", "condition"]].copy(),
     )
 
 

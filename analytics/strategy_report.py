@@ -60,7 +60,7 @@ from analytics.reporting.document import render_html
 from analytics.reporting.matched_control import build_target_space_null_sections
 from analytics.reporting.ortholog_evidence import build_ortholog_evidence_sections
 from analytics.reporting.overview import build_overview, merge_alignment_summary
-from analytics.reporting.pathogenic_variants import build_pathogenic_variant_sections
+from analytics.reporting.pathogenic_variants import build_pathogenic_variant_sections, build_pathogenic_qc_sections
 from analytics.reporting.qc import build_methods_sections
 from analytics.reporting.variant_profile import (
     build_clinvar_gnomad_sections,
@@ -795,7 +795,7 @@ def _build_report(
                         "code": code_provenance,
                         "gnomad_supplement": scientific_config["gnomad_supplement"],
                     },
-                ),
+                ) + build_pathogenic_qc_sections(pathogenic_analysis),
             ),
         ]
 

@@ -13,6 +13,7 @@ dependencies:
   - pybigwig
   - pysam
   - pytest
+  - nodejs  # Browser-side report calculation tests; no browser or network required.
   - bedtools
   - htslib
   - r-base=4.5
