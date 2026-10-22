@@ -171,6 +171,22 @@ cache identity. Local VEP is probed before an analysis workspace is created.
 
 ## Report Semantics
 
+### Strategy Concordance
+
+Candidate Profile retains the pairwise Jaccard matrix and adds one interactive
+area-proportional two-set diagram. A selection compares two strategies or one
+strategy with the union of all other strategies. The matrix can select a pair.
+Both views count distinct normalized alleles across gene contexts and include
+all candidate variant types. “Only” refers to the selected pair, not necessarily
+to all strategies. Directional coverage is shared / opposite-set size; an empty
+denominator is undefined and displayed as `n/a`.
+
+The diagram reuses summary counts: for strategy A, its intersection with the
+other-strategy union is |A| minus its exclusive count, and that union's size is
+the complete union minus A's exclusive count. Pairwise unions must never be
+summed to derive the other-strategy union. No new evidence scan or scientific
+cache version is required for this presentation.
+
 ### Firth Model Diagnostics
 
 Each continuous model retains its R warnings in the result reason. Models with

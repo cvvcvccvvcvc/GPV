@@ -26,6 +26,7 @@ from .config import (
     TARGET_CONTEXT_ORDER,
 )
 from .conservation import candidate_phylop_figure, candidate_phylop_summary_figure
+from .strategy_overlap import strategy_set_overlap_view
 
 def strategy_overlap_figure(overlap: StrategyOverlap | None):
     if overlap is None:
@@ -345,7 +346,8 @@ def build_variant_sections(
     sections = ["<h2>Strategy Concordance</h2>"]
     fig_overlap = strategy_overlap_figure(variant_summary.overlap)
     if fig_overlap is not None:
-        sections.append(fig_html(fig_overlap))
+        sections.append(f'<div id="strategy-overlap-jaccard">{fig_html(fig_overlap)}</div>')
+        sections.append(strategy_set_overlap_view(variant_summary))
 
     gene_distribution = gene_variant_distribution_figure(
         variant_summary.gene_variant_counts,
