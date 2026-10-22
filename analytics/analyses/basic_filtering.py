@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import gzip
 import json
-import math
 import tempfile
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -16,9 +15,6 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from analytics.vep.consequences import (
-    VALIDATION_CONSEQUENCE_OPTIONS as CONSEQUENCE_OPTIONS,
-)
 from analytics.io.artifacts import path_metadata, write_json_atomic
 from analytics.io.duckdb import available_cpu_count, configure_duckdb_memory
 from analytics.io.variant_source import (
@@ -27,29 +23,24 @@ from analytics.io.variant_source import (
     variant_source_sql,
     variant_source_blocks,
 )
-from genomics.variants import read_failed_regions
-from .conservation_validation import (
-    PHYLOP_BANDS,
-    SCORE_COLUMN,
-    TARGET_CONTEXT_OPTIONS,
-    VARIANT_TYPE_OPTIONS,
-    ConservationCohort,
-    add_grouped_bh,
-    assign_phylop_band,
-    filter_consequence,
-    filter_target_context,
-    filter_variant_type,
+from analytics.vep.consequences import (
+    VALIDATION_CONSEQUENCE_OPTIONS as CONSEQUENCE_OPTIONS,
+    VALIDATION_CONSEQUENCE_TERMS,
 )
-from .statistics import EnrichmentResult, enrichment_result, mantel_haenszel_adjusted
+from .variant_summary_aggregation import _common_prefix_sql, _register_reference_tables
+
+CANDIDATE_CONSEQUENCE_OPTIONS = (*CONSEQUENCE_OPTIONS, ("not_annotated", "Not annotated"))
 
 
-FILTER_SCORE_SCHEMA_VERSION = 2
+FILTER_SCORE_SCHEMA_VERSION = 3
 UNION_STRATEGY = "union"
 FILTER_SCORE_COLUMNS = [
     "variant_key",
     "strategy",
     "variant_type",
     "gnomad_status",
+    "target_context",
+    "consequence",
     "ortholog_support",
     "strategy_support",
     "family_support",
@@ -70,7 +61,6 @@ class BasicFilteringAnalysis:
     score_path: Path | None
     score_manifest_path: Path | None
     candidate_curves: pd.DataFrame
-    clinvar_curves: pd.DataFrame
     cache_hit: bool = False
 
 
@@ -80,13 +70,13 @@ def build_basic_filtering_analysis(
     variant_strategy_support_tsv: Path | Sequence[Path],
     annotation_failures_tsv: Path | Sequence[Path],
     analytics_dir: Path,
-    cohort: ConservationCohort,
+    genes_tsv: Path | Sequence[Path],
+    target_features_tsv: Path | Sequence[Path],
     strategies: list[str],
-    eligible_gene_ids_by_strategy: dict[str, set[str]],
     cache_policy: str = "keep",
     filter_support_source: Path | Sequence[Path] | None = None,
 ) -> BasicFilteringAnalysis:
-    """Build candidate-retention, gnomAD, and ClinVar threshold curves."""
+    """Build context-specific candidate-retention and gnomAD threshold curves."""
 
     if cache_policy == "keep":
         score_path, manifest_path, cache_hit = build_or_load_filter_score_store(
@@ -95,38 +85,31 @@ def build_basic_filtering_analysis(
             annotation_failures_tsv=annotation_failures_tsv,
             analytics_dir=analytics_dir,
             strategies=strategies,
+            genes_tsv=genes_tsv, target_features_tsv=target_features_tsv,
         )
         histograms = read_filter_score_histograms(score_path)
-        clinvar_scores = read_clinvar_filter_scores(score_path, cohort.variants)
     elif cache_policy == "discard":
-        histograms, clinvar_scores = _stream_filter_data(
+        histograms = _stream_filter_data(
             variant_annotations_source=variant_annotations_source,
             variant_strategy_support_tsv=variant_strategy_support_tsv,
             filter_support_source=filter_support_source, annotation_failures_tsv=annotation_failures_tsv,
-            analytics_dir=analytics_dir, cohort=cohort.variants,
+            analytics_dir=analytics_dir, genes_tsv=genes_tsv, target_features_tsv=target_features_tsv,
         )
         score_path = manifest_path = None
         cache_hit = False
     else:
         raise ValueError(f"Unknown cache policy: {cache_policy}")
     candidate_curves = candidate_curves_from_histograms(histograms)
-    clinvar_curves = compute_clinvar_filter_curves(
-        cohort=cohort,
-        clinvar_scores=clinvar_scores,
-        strategies=strategies,
-        eligible_gene_ids_by_strategy=eligible_gene_ids_by_strategy,
-    )
     return BasicFilteringAnalysis(
         score_path,
         manifest_path,
         candidate_curves,
-        clinvar_curves,
         cache_hit,
     )
 
 
 def _stream_filter_data(*, variant_annotations_source, variant_strategy_support_tsv,
-                        filter_support_source, annotation_failures_tsv, analytics_dir, cohort):
+                        filter_support_source, annotation_failures_tsv, analytics_dir, genes_tsv, target_features_tsv):
     source, support_columns = _resolve_filter_sources(
         variant_annotations_source, variant_strategy_support_tsv,
     )
@@ -143,7 +126,7 @@ def _stream_filter_data(*, variant_annotations_source, variant_strategy_support_
     if prepared_support is not None and set(support_blocks) - {block.identity["block"] for block in blocks}:
         raise ValueError("Prepared support contains blocks absent from variant annotations")
     analytics_dir.mkdir(parents=True, exist_ok=True)
-    histograms, scores = [], []
+    histograms = []
     with tempfile.TemporaryDirectory(prefix=".filter_scores.", dir=analytics_dir) as temporary:
         for index, block in enumerate(blocks, 1):
             support = support_blocks.get(block.identity["block"]) if prepared_support is not None else None
@@ -154,15 +137,14 @@ def _stream_filter_data(*, variant_annotations_source, variant_strategy_support_
                 source=block, support_path=variant_strategy_support_tsv,
                 support_columns=support_columns, annotation_failures_tsv=annotation_failures_tsv,
                 temp_dir=Path(temporary), prepared_support=support,
+                genes_tsv=genes_tsv, target_features_tsv=target_features_tsv,
             ) as connection:
                 histograms.append(_filter_score_histograms(connection, "filter_scores"))
-                scores.append(_clinvar_filter_scores(connection, "filter_scores", cohort))
     if not histograms:
-        return pd.DataFrame(), pd.DataFrame(columns=FILTER_SCORE_COLUMNS)
+        return pd.DataFrame()
     histogram = pd.concat(histograms, ignore_index=True)
     columns = [column for column in histogram.columns if column != "variant_count"]
-    return (histogram.groupby(columns, as_index=False, sort=True)["variant_count"].sum(),
-            pd.concat(scores, ignore_index=True))
+    return histogram.groupby(columns, as_index=False, sort=True)["variant_count"].sum()
 
 
 def build_or_load_filter_score_store(
@@ -172,6 +154,8 @@ def build_or_load_filter_score_store(
     annotation_failures_tsv: Path | Sequence[Path],
     analytics_dir: Path,
     strategies: list[str],
+    genes_tsv: Path | Sequence[Path],
+    target_features_tsv: Path | Sequence[Path],
 ) -> tuple[Path, Path, bool]:
     """Materialize one bounded-width allele/strategy table for all filter views."""
 
@@ -190,6 +174,8 @@ def build_or_load_filter_score_store(
             path_metadata(path) for path in _paths(annotation_failures_tsv)
         ],
         "strategies": sorted(str(value) for value in strategies),
+        "genes": [path_metadata(path) for path in _paths(genes_tsv)],
+        "target_features": [path_metadata(path) for path in _paths(target_features_tsv)],
     }
     if score_path.exists() and manifest_path.exists():
         try:
@@ -213,6 +199,7 @@ def build_or_load_filter_score_store(
             annotation_failures_tsv=annotation_failures_tsv,
             score_path=score_path,
             temp_dir=Path(temporary),
+            genes_tsv=genes_tsv, target_features_tsv=target_features_tsv,
         )
     manifest = {
         "status": "complete",
@@ -227,7 +214,8 @@ def build_or_load_filter_score_store(
 def _resolve_filter_sources(variant_annotations_source, variant_strategy_support_tsv):
     source = resolve_variant_table_source(
         variant_annotations_source,
-        required_columns={"variant_key", "event_type", "lookup_status", "gnomad_af"},
+        required_columns={"variant_key", "gene_id", "event_type", "lookup_status", "gnomad_af",
+                          "vep_status", "vep_consequence_terms"},
     )
     support_paths = _paths(variant_strategy_support_tsv)
     support_columns = _read_header(support_paths[0])
@@ -258,6 +246,8 @@ def _build_filter_score_store(
     annotation_failures_tsv: Path | Sequence[Path],
     score_path: Path,
     temp_dir: Path,
+    genes_tsv: Path | Sequence[Path],
+    target_features_tsv: Path | Sequence[Path],
 ) -> int:
     with tempfile.NamedTemporaryFile(
         dir=score_path.parent,
@@ -271,6 +261,7 @@ def _build_filter_score_store(
         with _filter_score_connection(
             source=source, support_path=support_path, support_columns=support_columns,
             annotation_failures_tsv=annotation_failures_tsv, temp_dir=temp_dir,
+            genes_tsv=genes_tsv, target_features_tsv=target_features_tsv,
         ) as connection:
             row_count = int(connection.execute("SELECT count(*) FROM filter_scores").fetchone()[0])
             connection.execute(
@@ -287,7 +278,7 @@ def _build_filter_score_store(
 
 @contextmanager
 def _filter_score_connection(*, source, support_path, support_columns, annotation_failures_tsv,
-                             temp_dir, prepared_support=None):
+                             temp_dir, genes_tsv, target_features_tsv, prepared_support=None):
     repaired_status = "gnomad_lookup_status" if "gnomad_lookup_status" in source.columns else "''"
     thread_count = available_cpu_count()
     with duckdb.connect() as connection:
@@ -295,7 +286,10 @@ def _filter_score_connection(*, source, support_path, support_columns, annotatio
         connection.execute("SET preserve_insertion_order=false")
         connection.execute(f"SET temp_directory={sql_string(temp_dir)}")
         configure_duckdb_memory(connection, thread_count)
-        _register_gnomad_failures(connection, annotation_failures_tsv)
+        _register_reference_tables(
+            connection, genes_path=genes_tsv, target_features_path=target_features_tsv,
+            annotation_failures_path=annotation_failures_tsv,
+        )
         connection.execute(
             f"CREATE VIEW variant_source_rows AS SELECT * FROM {variant_source_sql(source)}"
         )
@@ -330,7 +324,7 @@ def _filter_score_connection(*, source, support_path, support_columns, annotatio
             "FROM classified GROUP BY variant_key"
         )
         connection.execute(
-            "CREATE TEMP VIEW typed_support AS SELECT variant_key, trim(strategy) AS strategy, "
+            "CREATE TEMP VIEW typed_support AS SELECT variant_key, gene_id, trim(strategy) AS strategy, "
             "try_cast(alt_support_ortholog_count AS BIGINT) AS ortholog_support, "
             "try_cast(nullif(alt_support_family_count, '') AS BIGINT) AS family_support, "
             "try_cast(nullif(site_aligned_ortholog_count, '') AS BIGINT) AS site_aligned "
@@ -347,30 +341,61 @@ def _filter_score_connection(*, source, support_path, support_columns, annotatio
         )
         if invalid:
             raise ValueError(f"Variant strategy support contains {invalid} invalid filter scores")
+        missing_annotations = connection.execute(
+            "SELECT count(*) FROM typed_support s LEFT JOIN variant_source_rows a "
+            "USING (variant_key, gene_id) WHERE a.variant_key IS NULL"
+        ).fetchone()[0]
+        if missing_annotations:
+            raise ValueError(f"Variant strategy support contains {missing_annotations} contexts absent from annotations")
+        missing_genes = connection.execute(
+            "SELECT count(*) FROM variant_source_rows a LEFT JOIN gene_begins g USING (gene_id) "
+            "WHERE g.gene_begin IS NULL"
+        ).fetchone()[0]
+        if missing_genes:
+            raise ValueError(f"Variant annotations contain {missing_genes} contexts absent from target genes")
+        ref = "split_part(split_part(a.variant_key, ':', 3), '>', 1)"
+        alt = "split_part(split_part(a.variant_key, ':', 3), '>', 2)"
+        position = f"try_cast(split_part(a.variant_key, ':', 2) AS BIGINT) - g.gene_begin + ({_common_prefix_sql(ref, alt)})"
+        terms = "string_split(coalesce(a.vep_consequence_terms, ''), '|')"
+        memberships = [
+            f"({sql_string(key)}, a.vep_status = 'ok' AND list_has_any({terms}, "
+            f"[{','.join(sql_string(term) for term in sorted(accepted))}]))"
+            for key, accepted in VALIDATION_CONSEQUENCE_TERMS.items()
+        ]
+        recognized = set().union(*VALIDATION_CONSEQUENCE_TERMS.values())
+        recognized_sql = '[' + ','.join(sql_string(term) for term in sorted(recognized)) + ']'
+        annotated = "(a.vep_status = 'ok' AND coalesce(a.vep_consequence_terms, '') <> '')"
+        memberships += [
+            "('all', true)",
+            f"('other', {annotated} AND len(list_filter({terms}, t -> NOT list_contains({recognized_sql}, t))) > 0)",
+            f"('not_annotated', NOT coalesce({annotated}, false))",
+        ]
+        # Scope before reducing support: a synonymous call cannot borrow depth from
+        # an intronic or different-gene row of the same genomic allele.
+        connection.execute(
+            "CREATE TEMP TABLE scoped_support AS SELECT s.*, c.target_context, m.consequence "
+            "FROM typed_support s JOIN variant_source_rows a USING (variant_key, gene_id) "
+            "JOIN gene_begins g ON g.gene_id = a.gene_id "
+            f"LEFT JOIN target_contexts c ON c.gene_id = a.gene_id AND ({position}) >= c.start0 "
+            f"AND ({position}) < c.end0, LATERAL (VALUES {','.join(memberships)}) m(consequence, included) "
+            "WHERE m.included"
+        )
         connection.execute(
             "CREATE TEMP TABLE compact_support AS SELECT variant_key, strategy, "
+            "coalesce(scope.target_context, 'other') AS target_context, consequence, "
             "max(ortholog_support) AS ortholog_support, max(family_support) AS family_support, "
             "min(site_aligned) AS site_aligned_min, max(site_aligned) AS site_aligned_max "
-            "FROM typed_support GROUP BY variant_key, strategy"
+            "FROM scoped_support, LATERAL (VALUES ('all'), (target_context)) scope(target_context) "
+            "GROUP BY variant_key, strategy, scope.target_context, consequence"
         )
-        missing_annotations = int(
-            connection.execute(
-                "SELECT count(*) FROM compact_support s "
-                "LEFT JOIN global_annotations a USING (variant_key) "
-                "WHERE a.variant_key IS NULL"
-            ).fetchone()[0]
-        )
-        if missing_annotations:
-            raise ValueError(
-                "Variant strategy support contains "
-                f"{missing_annotations} alleles absent from annotations"
-            )
         connection.execute(
-            "CREATE TEMP TABLE filter_scores AS SELECT s.variant_key, s.strategy, "
-            "a.variant_type, a.gnomad_status, s.ortholog_support, "
-            "count(*) OVER (PARTITION BY s.variant_key) AS strategy_support, "
+            "CREATE TEMP TABLE filter_scores AS WITH strategy_counts AS ("
+            "SELECT variant_key, count(DISTINCT strategy) AS strategy_support FROM typed_support GROUP BY variant_key) "
+            "SELECT s.variant_key, s.strategy, a.variant_type, a.gnomad_status, "
+            "s.target_context, s.consequence, s.ortholog_support, n.strategy_support, "
             "s.family_support, s.site_aligned_min, s.site_aligned_max "
-            "FROM compact_support s JOIN global_annotations a USING (variant_key)"
+            "FROM compact_support s JOIN global_annotations a USING (variant_key) "
+            "JOIN strategy_counts n USING (variant_key)"
         )
         yield connection
 
@@ -388,13 +413,13 @@ def _filter_score_histograms(connection, relation: str) -> pd.DataFrame:
     metrics = ", ".join(f"({sql_string(key)}, {column})" for key, _label, column in FILTER_OPTIONS)
     return connection.execute(
             f"WITH individual AS MATERIALIZED (SELECT * FROM {relation}), "
-            "combined AS (SELECT variant_key, 'union' AS strategy, variant_type, gnomad_status, "
+            "combined AS (SELECT variant_key, 'union' AS strategy, variant_type, gnomad_status, target_context, consequence, "
             "max(ortholog_support) AS ortholog_support, max(strategy_support) AS strategy_support, "
             "max(family_support) AS family_support, min(site_aligned_min) AS site_aligned_min, "
             "max(site_aligned_max) AS site_aligned_max FROM individual "
-            "GROUP BY variant_key, variant_type, gnomad_status), "
+            "GROUP BY variant_key, variant_type, gnomad_status, target_context, consequence), "
             "scores AS (SELECT * FROM individual UNION ALL SELECT * FROM combined) "
-            "SELECT strategy, variant_type, filter_key, score, gnomad_status, count(*) AS variant_count "
+            "SELECT strategy, variant_type, target_context, consequence, filter_key, score, gnomad_status, count(*) AS variant_count "
             f"FROM scores, LATERAL (VALUES {metrics}) AS metric(filter_key, score) "
             "WHERE score IS NOT NULL GROUP BY ALL",
         ).fetchdf()
@@ -405,6 +430,8 @@ def candidate_curves_from_histograms(histograms: pd.DataFrame) -> pd.DataFrame:
         "strategy",
         "variant_type",
         "filter_key",
+        "target_context",
+        "consequence",
         "threshold",
         "retained_variant_count",
         "total_variant_count",
@@ -417,9 +444,9 @@ def candidate_curves_from_histograms(histograms: pd.DataFrame) -> pd.DataFrame:
     if histograms.empty:
         return pd.DataFrame(columns=columns)
     rows: list[dict[str, object]] = []
-    group_columns = ["strategy", "variant_type", "filter_key"]
+    group_columns = ["strategy", "variant_type", "filter_key", "target_context", "consequence"]
     for keys, subset in histograms.groupby(group_columns, sort=True):
-        strategy, variant_type, filter_key = keys
+        strategy, variant_type, filter_key, target_context, consequence = keys
         subset = subset.copy()
         subset["score"] = pd.to_numeric(subset["score"], errors="raise").astype(int)
         subset["variant_count"] = pd.to_numeric(
@@ -452,6 +479,8 @@ def candidate_curves_from_histograms(histograms: pd.DataFrame) -> pd.DataFrame:
                     "strategy": str(strategy),
                     "variant_type": str(variant_type),
                     "filter_key": str(filter_key),
+                    "target_context": str(target_context),
+                    "consequence": str(consequence),
                     "threshold": threshold,
                     "retained_variant_count": retained,
                     "total_variant_count": total,
@@ -463,305 +492,6 @@ def candidate_curves_from_histograms(histograms: pd.DataFrame) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows, columns=columns)
-
-
-def read_clinvar_filter_scores(score_path: Path, cohort: pd.DataFrame) -> pd.DataFrame:
-    with duckdb.connect() as connection:
-        thread_count = available_cpu_count()
-        connection.execute(f"SET threads={thread_count}")
-        configure_duckdb_memory(connection, thread_count)
-        return _clinvar_filter_scores(connection, f"read_parquet({sql_string(score_path)})", cohort)
-
-
-def _clinvar_filter_scores(connection, relation: str, cohort: pd.DataFrame) -> pd.DataFrame:
-    keys = pd.DataFrame({"variant_key": sorted(set(cohort["variant_key"].astype(str)))})
-    connection.register("clinvar_keys", keys)
-    return connection.execute(
-            "SELECT s.variant_key, s.strategy, s.variant_type, s.ortholog_support, "
-            "s.strategy_support, s.family_support, s.site_aligned_min, s.site_aligned_max "
-            f"FROM {relation} s "
-            "JOIN clinvar_keys c USING (variant_key)",
-        ).fetchdf()
-
-
-def compute_clinvar_filter_curves(
-    *,
-    cohort: ConservationCohort,
-    clinvar_scores: pd.DataFrame,
-    strategies: list[str],
-    eligible_gene_ids_by_strategy: dict[str, set[str]],
-) -> pd.DataFrame:
-    """Evaluate each selected cohort at every distinct change in call membership."""
-    score_maps = _clinvar_score_maps(clinvar_scores)
-    eligible_sets = dict(eligible_gene_ids_by_strategy)
-    eligible_sets[UNION_STRATEGY] = set().union(
-        *(eligible_sets.get(strategy, set()) for strategy in strategies)
-    )
-    rows: list[dict[str, object]] = []
-    for strategy in [*strategies, UNION_STRATEGY]:
-        eligible = eligible_sets.get(strategy, set())
-        strategy_frame = cohort.variants[
-            cohort.variants["gene_ids"].map(
-                lambda value: bool(eligible.intersection(str(value).split("|")))
-            )
-        ].copy()
-        for filter_key, _label, score_column in FILTER_OPTIONS:
-            # NaN means not called. A real zero (no known family) remains a call.
-            strategy_frame["filter_score"] = (
-                strategy_frame["variant_key"]
-                .astype(str)
-                .map(score_maps.get((strategy, score_column), {}))
-            )
-            for variant_type, _variant_label in VARIANT_TYPE_OPTIONS:
-                if variant_type != "snv" and filter_key in {"family", "aligned_min", "aligned_max"}:
-                    continue
-                type_frame = filter_variant_type(strategy_frame, variant_type)
-                for target_context, _context_label in TARGET_CONTEXT_OPTIONS:
-                    context_frame = filter_target_context(type_frame, target_context)
-                    for consequence, _consequence_label in CONSEQUENCE_OPTIONS:
-                        working = filter_consequence(context_frame, consequence)
-                        dimensions = dict(
-                            strategy=strategy,
-                            variant_type=variant_type,
-                            target_context=target_context,
-                            consequence=consequence,
-                            filter_key=filter_key,
-                        )
-                        rows.extend(
-                            _unadjusted_curve_rows(
-                                working,
-                                _select_clinvar_thresholds(working, filter_key),
-                                **dimensions,
-                            )
-                        )
-                        scored = working[
-                            np.isfinite(pd.to_numeric(working[SCORE_COLUMN], errors="coerce"))
-                        ]
-                        rows.extend(
-                            _fixed_curve_rows(
-                                scored, _select_clinvar_thresholds(scored, filter_key), **dimensions
-                            )
-                        )
-    results = pd.DataFrame(rows)
-    if not results.empty:
-        add_grouped_bh(
-            results,
-            "result_p",
-            "result_q",
-            ["mode", "filter_key", "variant_type", "target_context", "consequence"],
-        )
-    return results
-
-
-def _select_clinvar_thresholds(working: pd.DataFrame, filter_key: str) -> list[int]:
-    scores = sorted(set(working["filter_score"].dropna().astype(int)))
-    if filter_key == "aligned_max":
-        return sorted({0, *scores})
-    baseline = 0 if filter_key == "family" else 1
-    return sorted({baseline, *(score + 1 for score in scores if score >= baseline)})
-
-
-def _unadjusted_curve_rows(
-    working: pd.DataFrame,
-    thresholds: list[int],
-    **dimensions: object,
-) -> list[dict[str, object]]:
-    count_rows = _count_curves(
-        working, thresholds, at_most=dimensions["filter_key"] == "aligned_max"
-    )
-    return [
-        _association_row_from_counts(
-            len(working),
-            threshold,
-            counts,
-            mode="unadjusted",
-            **dimensions,
-        )
-        for threshold, counts in zip(thresholds, count_rows)
-    ]
-
-
-def _fixed_curve_rows(
-    working: pd.DataFrame,
-    thresholds: list[int],
-    **dimensions: object,
-) -> list[dict[str, object]]:
-    scored = working.copy()
-    scored["band"] = assign_phylop_band(scored[SCORE_COLUMN])
-    band_count_curves = {
-        band_key: _count_curves(
-            scored[scored["band"] == band_key],
-            thresholds,
-            at_most=dimensions["filter_key"] == "aligned_max",
-        )
-        for band_key, _band_label, _range_text in PHYLOP_BANDS
-    }
-    rows = []
-    benign_total = int(scored["label_class"].eq("benign").sum())
-    pathogenic_total = int(scored["label_class"].eq("pathogenic").sum())
-    populated_bands = scored["band"].nunique()
-    for threshold_index, threshold in enumerate(thresholds):
-        strata = []
-        for band_key, _band_label, _range_text in PHYLOP_BANDS:
-            counts = band_count_curves[band_key][threshold_index]
-            strata.append(
-                EnrichmentResult(
-                    str(band_key),
-                    *counts,
-                    float("nan"),
-                    float("nan"),
-                    float("nan"),
-                    float("nan"),
-                )
-            )
-        observed_total = sum(item.benign_observed + item.pathogenic_observed for item in strata)
-        reason = _estimability_reason(
-            len(scored), benign_total, pathogenic_total, observed_total
-        )
-        if populated_bands < 2:
-            reason = reason or "At least two populated phyloP bands are required."
-        adjusted = mantel_haenszel_adjusted(strata) if not reason else None
-        if adjusted is None or not math.isfinite(adjusted.cmh_p):
-            reason = reason or "The fixed-band tables do not provide an estimable common OR."
-        elif not (
-            math.isfinite(adjusted.odds_ratio_mh)
-            and adjusted.odds_ratio_mh > 0
-            and math.isfinite(adjusted.ci_low)
-            and math.isfinite(adjusted.ci_high)
-        ):
-            reason = "The fixed-band common OR or confidence interval is not finite."
-        rows.append(
-            {
-                **dimensions,
-                "mode": "fixed",
-                "threshold": threshold,
-                "usable_rows": int(len(scored)),
-                "benign_observed": sum(item.benign_observed for item in strata),
-                "pathogenic_observed": sum(item.pathogenic_observed for item in strata),
-                "benign_not_observed": sum(item.benign_not_observed for item in strata),
-                "pathogenic_not_observed": sum(item.pathogenic_not_observed for item in strata),
-                "result_or": adjusted.odds_ratio_mh if adjusted and not reason else float("nan"),
-                "ci_low": adjusted.ci_low if adjusted and not reason else float("nan"),
-                "ci_high": adjusted.ci_high if adjusted and not reason else float("nan"),
-                "result_p": adjusted.cmh_p if adjusted and not reason else float("nan"),
-                "status": "estimated" if adjusted and not reason else "not_estimable",
-                "reason": reason,
-            }
-        )
-    return rows
-
-
-def _association_row_from_counts(
-    row_count: int,
-    threshold: int,
-    counts: tuple[int, int, int, int],
-    *,
-    mode: str,
-    **dimensions: object,
-) -> dict[str, object]:
-    observed_total = counts[0] + counts[1]
-    reason = _estimability_reason(
-        row_count, counts[0] + counts[2], counts[1] + counts[3], observed_total
-    )
-    result = enrichment_result(str(threshold), *counts) if not reason else None
-    return {
-        **dimensions,
-        "mode": mode,
-        "threshold": threshold,
-        "usable_rows": int(row_count),
-        "benign_observed": counts[0],
-        "pathogenic_observed": counts[1],
-        "benign_not_observed": counts[2],
-        "pathogenic_not_observed": counts[3],
-        "result_or": result.odds_ratio if result else float("nan"),
-        "ci_low": result.ci_low if result else float("nan"),
-        "ci_high": result.ci_high if result else float("nan"),
-        "result_p": result.fisher_p if result else float("nan"),
-        "status": "not_estimable" if reason else "estimated",
-        "reason": reason,
-    }
-
-
-def _count_curves(
-    working: pd.DataFrame,
-    thresholds: list[int],
-    *,
-    at_most: bool = False,
-) -> list[tuple[int, int, int, int]]:
-    """Count selected calls; absent calls never pass even an upper-bound filter."""
-    if not thresholds:
-        return []
-    labels = working["label_class"].astype(str)
-    scores = working["filter_score"]
-    maximum = max(max(thresholds), int(scores.max()) if scores.notna().any() else 0)
-    observed_by_label = {}
-    totals = {}
-    for label in ("benign", "pathogenic"):
-        totals[label] = int(labels.eq(label).sum())
-        values = scores[labels.eq(label) & scores.notna()].to_numpy(dtype=int)
-        histogram = np.bincount(values, minlength=maximum + 1)
-        observed_by_label[label] = (
-            np.cumsum(histogram) if at_most else np.cumsum(histogram[::-1])[::-1]
-        )
-    return [
-        (
-            int(observed_by_label["benign"][t]),
-            int(observed_by_label["pathogenic"][t]),
-            totals["benign"] - int(observed_by_label["benign"][t]),
-            totals["pathogenic"] - int(observed_by_label["pathogenic"][t]),
-        )
-        for t in thresholds
-    ]
-
-
-def _estimability_reason(
-    row_count: int,
-    benign_total: int,
-    pathogenic_total: int,
-    observed_total: int,
-) -> str:
-    if row_count == 0:
-        return "No ClinVar alleles in this selector."
-    if benign_total == 0 or pathogenic_total == 0:
-        return "Both B/LB and P/LP alleles are required."
-    if observed_total == 0 or observed_total == row_count:
-        return "Both ALT-observed and ALT-not-observed alleles are required."
-    return ""
-
-
-def _clinvar_score_maps(
-    scores: pd.DataFrame,
-) -> dict[tuple[str, str], dict[str, int]]:
-    maps: dict[tuple[str, str], dict[str, int]] = {}
-    for _filter_key, _label, column in FILTER_OPTIONS:
-        valid = scores.dropna(subset=[column])
-        for strategy, group in valid.groupby("strategy", sort=False):
-            maps[(str(strategy), column)] = dict(
-                zip(group["variant_key"], group[column].astype(int))
-            )
-        grouped = valid.groupby("variant_key")[column]
-        union = grouped.min() if column == "site_aligned_min" else grouped.max()
-        maps[(UNION_STRATEGY, column)] = union.astype(int).to_dict()
-    return maps
-
-
-def _register_gnomad_failures(
-    connection,
-    path: Path | Sequence[Path],
-) -> None:
-    rows = []
-    for chrom, (_starts, intervals) in read_failed_regions(path, "gnomad").items():
-        rows.extend(
-            {"chrom": str(chrom), "start1": int(start), "end1": int(end)}
-            for start, end in intervals
-        )
-    frame = pd.DataFrame(rows, columns=["chrom", "start1", "end1"])
-    connection.register("gnomad_failures_input", frame)
-    connection.execute(
-        "CREATE VIEW gnomad_failures AS SELECT cast(chrom AS VARCHAR) AS chrom, "
-        "cast(start1 AS BIGINT) AS start1, cast(end1 AS BIGINT) AS end1 "
-        "FROM gnomad_failures_input"
-    )
 
 
 def _support_source_sql(

@@ -43,6 +43,7 @@ VARIANT_FIELDS = [
     "clinvar_scv_count",
     "vep_status",
     "vep_primary_consequence",
+    "vep_consequence_terms",
 ]
 TEST_CALCULATION_IDENTITY = {
     "semantics_version": 1,
@@ -323,6 +324,7 @@ def _make_source_run(
                 "clinvar_scv_count": "",
                 "vep_status": "ok",
                 "vep_primary_consequence": "missense_variant",
+                "vep_consequence_terms": "missense_variant",
             }
         ],
     )

@@ -75,7 +75,7 @@ linear quantiles, Freedman-Diaconis histogram edges, and box summaries are
 calculated. Medians and quantiles are not averaged across source runs or blocks.
 Variant summaries merge allele-disjoint blocks with exact allele memberships
 and AF frequencies. In discard mode, filtering consumes block-local relations
-and retains only histograms and ClinVar scores, not the full filter-score store.
+and retains only context/consequence histograms, not the full filter-score store.
 Ordinary ClinVar validation stores only universe allele memberships; enabling
 the target-space null still requires the full observed-variant store.
 
@@ -252,39 +252,46 @@ assertion records.
 
 ### Basic Filtering
 
-Variant type and filter selection apply to the whole tab. Retention and gnomAD
-share a strategy selector; ClinVar has independent strategy, adjustment,
-target-context, and consequence selectors.
+Variant type, target context, candidate VEP consequence, filter, and strategy
+selection apply to both retention and gnomAD. Basic Filtering is descriptive:
+it does not calculate ClinVar associations, odds ratios, or threshold p-values.
 
 `Compare all strategies` uses each strategy's own candidate denominator.
 `Union (any strategy)` counts each normalized allele once and accepts it when
-at least one calling strategy/context passes. Union odds ratios come from a new
-allele-level contingency table over the union of eligible genes; they are never
-averages of strategy odds ratios.
+at least one calling strategy/context passes.
+
+Context is assigned from canonical target features at the first affected
+normalized allele position, using the same context priority as the variant
+summary. Consequence uses all `vep_consequence_terms` of a successful candidate
+VEP annotation, not ClinVar molecular-consequence terms. Memberships can
+overlap: synonymous includes `synonymous_variant` and `stop_retained_variant`
+and does not exclude splice-region or other transcript effects. Failed or empty
+VEP annotations remain in `All consequences` and `Not annotated`.
+Both context and consequence must match the same gene-context row before its
+support is eligible. Only then are support scores reduced per allele/strategy
+and union, preventing support from another gene or consequence from passing a
+selected threshold. Strategy support counts all calling strategies for the
+allele; it is not recomputed within a consequence selection.
 
 Exact ALT support and strategy support use minimum thresholds. Supporting
 families count distinct known family IDs; an unresolved family is not a new
 family. Site-aligned ortholog filters support both maximum and minimum
-thresholds. Family and site-depth filters are SNV-only. Within an
-allele/strategy, maximum support is used for minimum thresholds and minimum site
-depth for maximum thresholds. Non-calls have missing scores and cannot pass a
-maximum threshold; zero known families is a valid called-SNV score. Invalid
-required support fails validation rather than silently removing rows.
+thresholds. Family and site-depth filters are SNV-only. Within an eligible
+allele/strategy selection, maximum support is used for minimum thresholds and
+minimum site depth for maximum thresholds. Zero known families is a valid
+called-SNV score. Invalid required support fails validation.
 
-ClinVar thresholds are derived after cohort selection and, for adjusted
-analyses, finite phyloP selection. Minimum-threshold membership changes at
-score + 1; maximum-threshold membership changes at the observed score.
-Unestimable results retain their reasons and break the odds-ratio line. Boundary
-triangles, connected by a dashed interval when consecutive, denote zero or
-infinite odds ratios. Confidence intervals are available in the point hover so
-they do not obscure dense threshold curves. Odds ratio above one means relative
-enrichment of benign/likely-benign over pathogenic/likely-pathogenic among
-retained calls. BH q-values cover thresholds and strategies within each filter,
-variant type, context, consequence, and adjustment mode; confidence intervals
-remain pointwise.
+Retention's fixed denominator is all candidate alleles in the selected cohort
+for that strategy. Its numerator includes failed gnomAD lookups. The gnomAD
+fraction is found / (found + not found) among retained alleles; failed lookups
+are excluded and shown separately on hover. An empty eligible denominator
+produces a missing fraction, not zero. Presence in gnomAD is population overlap,
+not a clinical benignity label or a calibrated measure of calling accuracy.
 
-Retention includes failed gnomAD lookups; the overlap denominator excludes
-them. Missing lookup and unestimable odds ratio are not negative results.
+Both plots default to a logarithmic threshold axis on `N + 1`, keeping threshold
+zero visible. Tick labels and hover report the original threshold `N`; a shared
+linear-scale option is available. The retained fraction and gnomAD fraction
+remain on linear percentage axes.
 
 ## Code Owners And Checks
 

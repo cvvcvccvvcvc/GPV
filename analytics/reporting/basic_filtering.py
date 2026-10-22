@@ -1,4 +1,4 @@
-"""Independent descriptive and ClinVar controls for candidate filtering."""
+"""Descriptive, context-specific candidate filtering controls."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from analytics.analyses.basic_filtering import (
     BasicFilteringAnalysis,
     FILTER_OPTIONS,
     UNION_STRATEGY,
+    CANDIDATE_CONSEQUENCE_OPTIONS as CONSEQUENCE_OPTIONS,
 )
 from analytics.analyses.conservation_validation import TARGET_CONTEXT_OPTIONS, VARIANT_TYPE_OPTIONS
-from analytics.vep.consequences import VALIDATION_CONSEQUENCE_OPTIONS as CONSEQUENCE_OPTIONS
 from .components import dataframe_records, strategy_label
 
 
@@ -32,14 +32,9 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
             if key != UNION_STRATEGY
         ],
         "variantTypes": [{"key": key, "label": label} for key, label in VARIANT_TYPE_OPTIONS],
-        "modes": [
-            {"key": "unadjusted", "label": "Unadjusted"},
-            {"key": "fixed", "label": "phyloP-adjusted"},
-        ],
         "contexts": [{"key": key, "label": label} for key, label in TARGET_CONTEXT_OPTIONS],
         "consequences": [{"key": key, "label": label} for key, label in CONSEQUENCE_OPTIONS],
         "candidate": dataframe_records(analysis.candidate_curves),
-        "clinvar": dataframe_records(analysis.clinvar_curves),
     }
     payload_json = json.dumps(payload, separators=(",", ":"), allow_nan=False).replace("</", "<\\/")
     return (
@@ -47,6 +42,9 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
     <div class="analysis-controls" id="basic-filtering-global-controls">
       <label>Filter<select data-role="filter"></select></label>
       <label>Variant type<select data-role="variant-type"></select></label>
+      <label>Target context<select data-role="target-context"></select></label>
+      <label>Consequence (VEP)<select data-role="consequence"></select></label>
+      <label>Threshold scale<select data-role="threshold-scale"><option value="log">Logarithmic (N + 1)</option><option value="linear">Linear</option></select></label>
     </div>
     <div class="analysis-controls analysis-controls-single" id="basic-filtering-candidate-controls">
       <label>Strategies<select data-role="candidate-strategy"></select></label>
@@ -54,20 +52,15 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
     <div id="basic-filtering-candidate-status" class="analysis-note" hidden></div>
     <div id="basic-filtering-retention" class="analysis-plot"></div>
     <div id="basic-filtering-gnomad" class="analysis-plot"></div>
-    <h3>ClinVar association</h3>
-    <div class="analysis-controls" id="basic-filtering-clinvar-controls">
-      <label>Strategy<select data-role="clinvar-strategy"></select></label>
-      <label>Analysis<select data-role="mode"></select></label>
-      <label>Target context<select data-role="target-context"></select></label>
-      <label>Consequence<select data-role="consequence"></select></label>
-    </div>
-    <div id="basic-filtering-status" class="analysis-note" hidden></div>
-    <div id="basic-filtering-clinvar" class="analysis-plot"></div>
+    <p class="analysis-note">Consequences use candidate VEP terms and may overlap (for example, synonymous and splice region).
+    Context and consequence must match the same target-gene row; each allele is counted once per selection.
+    gnomAD presence describes population overlap, not clinical benignity. Failed lookups are excluded only from its denominator.
+    The logarithmic view uses N + 1 so threshold zero remains visible; ticks and hover show N.</p>
     <script>(() => {
       const config = """
         + payload_json
         + """;
-      const roles = ['filter', 'variant-type', 'candidate-strategy', 'clinvar-strategy', 'mode', 'target-context', 'consequence'];
+      const roles = ['filter', 'variant-type', 'candidate-strategy', 'target-context', 'consequence', 'threshold-scale'];
       const selects = Object.fromEntries(roles.map(role => [role,
         document.querySelector('#tab-basic-filtering [data-role="' + role + '"]')]));
       const addOptions = (select, options) => options.forEach(item => select.add(new Option(item.label, item.key)));
@@ -75,27 +68,28 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
       addOptions(selects.filter, config.filters);
       addOptions(selects['variant-type'], config.variantTypes);
       addOptions(selects['candidate-strategy'], [{key: 'compare', label: 'Compare all strategies'}, ...config.strategies, union]);
-      addOptions(selects['clinvar-strategy'], [...config.strategies, union]);
-      addOptions(selects.mode, config.modes);
       addOptions(selects['target-context'], config.contexts);
       addOptions(selects.consequence, config.consequences);
       const colors = ['#356d8f', '#e1812c', '#499c68', '#9b5c98', '#c24d4d', '#79706e'];
       const labels = Object.fromEntries([...config.strategies, union].map(item => [item.key, item.label]));
       const color = strategy => strategy === 'union' ? '#242424' : colors[config.strategies.findIndex(item => item.key === strategy) % colors.length];
-      const finite = value => value !== null && value !== '' && Number.isFinite(Number(value));
       const count = value => Number(value || 0).toLocaleString('en-US');
-      const fmt = value => {
-        if (value === 'inf') return '∞';
-        if (value === '-inf') return '−∞';
-        if (!finite(value)) return 'NA';
-        const numeric = Number(value);
-        return numeric !== 0 && Math.abs(numeric) < 0.001 ? numeric.toExponential(2) : numeric.toPrecision(3);
-      };
       const atMost = () => selects.filter.value === 'aligned_max';
       const symbol = () => atMost() ? '≤' : '≥';
       const supported = () => selects['variant-type'].value === 'snv' || ['ortholog', 'strategy'].includes(selects.filter.value);
-      const commonRows = row => row.filter_key === selects.filter.value && row.variant_type === selects['variant-type'].value;
-      const xaxis = () => ({title: {text: 'Threshold (' + symbol() + ' N)'}, type: 'linear', rangemode: 'tozero'});
+      const commonRows = row => row.filter_key === selects.filter.value && row.variant_type === selects['variant-type'].value
+        && row.target_context === selects['target-context'].value && row.consequence === selects.consequence.value;
+      const logarithmic = () => selects['threshold-scale'].value === 'log';
+      const xaxis = (groups) => {
+        if (!logarithmic()) return {title: {text: 'Threshold (' + symbol() + ' N)'}, type: 'linear', rangemode: 'tozero'};
+        const max = Math.max(1, ...groups.map(group => group.rows.length ? group.rows[group.rows.length - 1].threshold : 0));
+        const ticks = [0];
+        for (let power = 1; power <= max; power *= 10) {
+          for (const multiplier of [1, 2, 5]) if (power * multiplier <= max) ticks.push(power * multiplier);
+        }
+        return {title: {text: 'Threshold (' + symbol() + ' N; log scale of N + 1)'}, type: 'log',
+          tickvals: ticks.map(value => value + 1), ticktext: ticks.map(String)};
+      };
       function note(id, text) {
         const element = document.getElementById(id);
         element.textContent = text;
@@ -108,98 +102,30 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
           supported() && commonRows(row) && row.strategy === strategy).sort((a, b) => a.threshold - b.threshold)}));
         const traces = (gnomad) => groups.filter(group => group.rows.length).map(({strategy, rows}) => ({
           type: 'scatter', mode: 'lines', name: labels[strategy], line: {color: color(strategy), width: 2, shape: 'hv'},
-          connectgaps: false, x: rows.map(row => row.threshold),
+          connectgaps: false, x: rows.map(row => logarithmic() ? row.threshold + 1 : row.threshold),
           y: rows.map(row => gnomad ? row.gnomad_found_fraction : row.retained_fraction),
           customdata: rows.map(row => gnomad
-            ? [count(row.gnomad_found_count), count(row.gnomad_eligible_count), count(row.gnomad_lookup_failed_count)]
-            : [count(row.retained_variant_count), count(row.total_variant_count)]),
-          hovertemplate: 'Threshold ' + symbol() + ' %{x}<br>' + (gnomad
-            ? 'gnomAD: %{customdata[0]} / %{customdata[1]}<br>Found: %{y:.2%}<br>Failed lookups excluded: %{customdata[2]}'
-            : 'Retained: %{customdata[0]} / %{customdata[1]}<br>Fraction: %{y:.2%}') + '<extra>%{fullData.name}</extra>',
+            ? [row.threshold, count(row.gnomad_found_count), count(row.gnomad_eligible_count), count(row.gnomad_lookup_failed_count)]
+            : [row.threshold, count(row.retained_variant_count), count(row.total_variant_count)]),
+          hovertemplate: 'Threshold ' + symbol() + ' %{customdata[0]}<br>' + (gnomad
+            ? 'gnomAD: %{customdata[1]} / %{customdata[2]}<br>Found: %{y:.2%}<br>Failed lookups excluded: %{customdata[3]}'
+            : 'Retained: %{customdata[1]} / %{customdata[2]}<br>Fraction: %{y:.2%}') + '<extra>%{fullData.name}</extra>',
         }));
         for (const [id, gnomad, title, ylabel] of [
           ['retention', false, 'Candidate alleles retained', 'Fraction retained'],
           ['gnomad', true, 'Exact alleles found in gnomAD', 'gnomAD found fraction'],
         ]) {
           Plotly.react('basic-filtering-' + id, traces(gnomad), {
-            title: {text: title}, template: 'plotly_white', height: 370, margin: {l: 72, r: 25, t: 55, b: 60},
-            xaxis: xaxis(), yaxis: {title: {text: ylabel}, tickformat: '.0%', range: [0, 1]},
-            legend: {orientation: 'h'},
+            title: {text: title}, template: 'plotly_white', height: 410, margin: {l: 72, r: 25, t: 55, b: 110},
+            xaxis: xaxis(groups), yaxis: {title: {text: ylabel}, tickformat: '.0%', range: [0, 1]},
+            legend: {orientation: 'h', x: 0, y: -0.3, yanchor: 'top'},
           }, {responsive: true});
         }
         note('basic-filtering-candidate-status', !supported() ? 'This filter is available for SNVs only.'
           : groups.every(group => !group.rows.length) ? 'No candidate alleles for this selection.' : '');
       }
-      function renderClinVar() {
-        const rows = config.clinvar.filter(row => supported() && commonRows(row)
-          && row.strategy === selects['clinvar-strategy'].value && row.mode === selects.mode.value
-          && row.target_context === selects['target-context'].value && row.consequence === selects.consequence.value)
-          .sort((a, b) => a.threshold - b.threshold);
-        const estimable = row => row.status === 'estimated' && finite(row.result_or) && Number(row.result_or) > 0
-          && finite(row.ci_low) && finite(row.ci_high);
-        const hover = row => [fmt(row.result_or), fmt(row.ci_low), fmt(row.ci_high), fmt(row.result_p), fmt(row.result_q),
-          count(row.benign_observed), count(row.pathogenic_observed), count(row.benign_not_observed), count(row.pathogenic_not_observed)];
-        const hovertemplate = 'Threshold ' + symbol() + ' %{x}<br>OR: %{customdata[0]} [%{customdata[1]}–%{customdata[2]}]'
-          + '<br>p / FDR q: %{customdata[3]} / %{customdata[4]}<br>Retained B/LB / P/LP: %{customdata[5]} / %{customdata[6]}'
-          + '<br>Not retained B/LB / P/LP: %{customdata[7]} / %{customdata[8]}<extra></extra>';
-        const traces = [{
-          type: 'scatter', mode: 'lines', line: {color: '#7a3e9d', width: 2, shape: 'hv'},
-          connectgaps: false, x: rows.map(row => row.threshold), y: rows.map(row => estimable(row) ? row.result_or : null),
-          customdata: rows.map(hover), hovertemplate,
-        }];
-        const boundary = rows.filter(row => row.status === 'estimated' && (row.result_or === 'inf' || row.result_or === 0));
-        const pointEstimates = rows.filter(estimable).map(row => Number(row.result_or));
-        const boundarySegments = [];
-        for (const row of boundary) {
-          const direction = row.result_or === 'inf' ? 'high' : 'low';
-          const previous = boundarySegments[boundarySegments.length - 1];
-          if (previous && previous.direction === direction && row.threshold === previous.end + 1) {
-            previous.end = row.threshold;
-            previous.count += 1;
-          } else {
-            boundarySegments.push({direction, start: row.threshold, end: row.threshold, count: 1});
-          }
-        }
-        if (boundarySegments.length) {
-          const high = pointEstimates.length ? Math.max(...pointEstimates) * 1.25 : 10;
-          const low = pointEstimates.length ? Math.min(...pointEstimates) / 1.25 : 0.1;
-          boundarySegments.forEach(segment => {
-            const y = segment.direction === 'high' ? high : low;
-            const marker = segment.direction === 'high' ? 'triangle-up' : 'triangle-down';
-            const range = segment.start === segment.end ? String(segment.start) : segment.start + '–' + segment.end;
-            const result = segment.direction === 'high' ? '∞' : '0';
-            traces.push({
-              type: 'scatter', mode: 'lines', x: [segment.start, segment.end], y: [y, y],
-              line: {color: '#7a3e9d', width: 2, dash: 'dot'}, hoverinfo: 'skip',
-            });
-            traces.push({
-              type: 'scatter', mode: 'markers', x: [segment.end], y: [y],
-              marker: {color: '#7a3e9d', size: 10, symbol: marker},
-              text: ['Threshold ' + symbol() + ' ' + range + '<br>OR: ' + result
-                + '<br>' + segment.count + ' threshold(s) at this boundary'],
-              hovertemplate: '%{text}<extra></extra>',
-            });
-          });
-        }
-        const any = rows.some(estimable) || boundarySegments.length;
-        Plotly.react('basic-filtering-clinvar', traces, {
-          title: {text: 'ClinVar B/LB versus P/LP association'}, template: 'plotly_white', height: 410,
-          margin: {l: 78, r: 25, t: 55, b: 60}, showlegend: false, xaxis: xaxis(),
-          yaxis: {title: {text: 'Odds ratio (log scale)'}, type: 'log'},
-          shapes: [{type: 'line', x0: 0, x1: 1, xref: 'paper', y0: 1, y1: 1, line: {dash: 'dash', color: '#8c8c8c'}}],
-          annotations: any ? [] : [{text: 'No estimable odds ratio for this selection.', x: 0.5, y: 0.5, xref: 'paper', yref: 'paper', showarrow: false}],
-        }, {responsive: true});
-        const unavailable = rows.filter(row => row.status !== 'estimated');
-        const reasons = [...new Set(unavailable.map(row => row.reason).filter(Boolean))];
-        note('basic-filtering-status', !supported() ? 'This filter is available for SNVs only.'
-          : [unavailable.length ? unavailable.length + ' threshold(s) without an OR estimate. ' + reasons.join(' ') : '', boundarySegments.length ? 'Dashed intervals and triangles mark OR = 0 or ∞ at the plot boundary. 95% confidence intervals are available on hover.' : ''].filter(Boolean).join(' '));
-      }
-      ['filter', 'variant-type'].forEach(role => selects[role].addEventListener('change', () => {
-        renderCandidate(); renderClinVar();
-      }));
-      selects['candidate-strategy'].addEventListener('change', renderCandidate);
-      ['clinvar-strategy', 'mode', 'target-context', 'consequence'].forEach(role => selects[role].addEventListener('change', renderClinVar));
-      renderCandidate(); renderClinVar();
+      roles.forEach(role => selects[role].addEventListener('change', renderCandidate));
+      renderCandidate();
     })();</script>
     """
     )

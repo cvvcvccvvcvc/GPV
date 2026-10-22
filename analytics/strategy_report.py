@@ -661,9 +661,9 @@ def _build_report(
             variant_strategy_support_tsv=inputs.variant_strategy_support_tsvs,
             annotation_failures_tsv=inputs.annotation_failure_tsvs,
             analytics_dir=heavy_dir,
-            cohort=conservation_analysis.validation.cohort,
+            genes_tsv=inputs.genes_tsvs,
+            target_features_tsv=inputs.target_features_tsvs,
             strategies=strategies,
-            eligible_gene_ids_by_strategy=eligible_gene_ids_by_strategy,
             cache_policy=args.cache_policy,
             filter_support_source=(
                 [source.prepared_cache_dir.parent / "filter_support" / "manifest.json"
@@ -674,10 +674,8 @@ def _build_report(
         timing["details"] = "cache hit" if basic_filtering.cache_hit else "cache miss"
         timing["metrics"] = {
             "candidate_curve_rows": int(len(basic_filtering.candidate_curves)),
-            "clinvar_curve_rows": int(len(basic_filtering.clinvar_curves)),
         }
     write_tsv_atomic(analytics_dir / "basic_filtering" / "candidate_curves.tsv.gz", basic_filtering.candidate_curves)
-    write_tsv_atomic(analytics_dir / "basic_filtering" / "clinvar_curves.tsv.gz", basic_filtering.clinvar_curves)
 
     negative_controls = None
     if args.target_space_null:

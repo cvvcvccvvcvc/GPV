@@ -153,7 +153,8 @@ def test_summary_and_filtering_match_raw_and_materialized_supplements(tmp_path, 
         assert result.global_groups['gnomad_status'].tolist() == [status]
         scores, _, _ = build_or_load_filter_score_store(variant_annotations_source=path,
             variant_strategy_support_tsv=support, annotation_failures_tsv=source.annotation_failures_tsv,
-            analytics_dir=tmp_path / f'filter{index}', strategies=['s1'])
+            analytics_dir=tmp_path / f'filter{index}', strategies=['s1'],
+            genes_tsv=source.genes_tsv, target_features_tsv=source.target_features_tsv)
         with duckdb.connect() as con:
             assert set(con.read_parquet(str(scores)).df()['gnomad_status']) == {status}
 

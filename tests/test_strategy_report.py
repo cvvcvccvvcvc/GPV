@@ -1043,7 +1043,7 @@ def test_clinvar_association_serializes_sparse_results_and_has_all_controls() ->
     assert "Synthetic group" in custom_html
 
 
-def test_basic_filtering_view_has_linear_threshold_controls_and_safe_json(
+def test_basic_filtering_view_has_shared_selectors_and_log_thresholds(
     tmp_path: Path,
 ) -> None:
     candidate = pd.DataFrame(
@@ -1063,50 +1063,23 @@ def test_basic_filtering_view_has_linear_threshold_controls_and_safe_json(
             }
         ]
     )
-    clinvar = pd.DataFrame(
-        [
-            {
-                "strategy": "s1",
-                "variant_type": "snv",
-                "filter_key": "ortholog",
-                "mode": "unadjusted",
-                "target_context": "all",
-                "consequence": "all",
-                "threshold": 1,
-                "result_or": float("inf"),
-                "ci_low": 0.5,
-                "ci_high": 10.0,
-                "result_p": float("nan"),
-                "result_q": float("nan"),
-                "usable_rows": 20,
-                "benign_observed": 5,
-                "pathogenic_observed": 1,
-                "status": "estimated",
-            }
-        ]
-    )
-    analysis = BasicFilteringAnalysis(
-        tmp_path / "scores.parquet",
-        tmp_path / "manifest.json",
-        candidate,
-        clinvar,
-    )
-
+    candidate["target_context"] = "all"
+    candidate["consequence"] = "all"
+    analysis = BasicFilteringAnalysis(tmp_path / "scores.parquet", tmp_path / "manifest.json", candidate)
     html = basic_filtering_view(analysis)
-
-    assert 'data-role="filter"' in html
-    assert 'data-role="candidate-strategy"' in html
-    assert 'data-role="clinvar-strategy"' in html
-    assert 'data-role="target-context"' in html
+    for role in ("filter", "candidate-strategy", "target-context", "consequence", "threshold-scale"):
+        assert f'data-role="{role}"' in html
+    assert "ClinVar association" not in html
+    assert "config.clinvar" not in html
     assert "Supporting families" in html
     assert "Union (any strategy)" in html
+    assert "type: 'log'" in html
     assert "type: 'linear'" in html
+    assert "row.threshold + 1" in html
+    assert "row.target_context ===" in html
+    assert "row.consequence ===" in html
     assert "Infinity" not in html
     assert "NaN" not in html
-    assert "mode: 'lines'" in html
-    assert "error_y" not in html
-    assert "const boundarySegments" in html
-    assert "Dashed intervals and triangles" in html
 
 
 def test_dataframe_records_replaces_nonfinite_values() -> None:
