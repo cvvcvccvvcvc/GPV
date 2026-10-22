@@ -83,11 +83,10 @@ def build_pathogenic_variant_sections(analysis: PathogenicVariantAnalysis) -> li
     <p id="pathogenic-selection" role="status" aria-live="polite"></p>
     <div class="pathogenic-actions"><button type="button" data-pathogenic-reset>Reset filters</button>
       <button type="button" id="pathogenic-open-qc">View selected variants in QC</button></div>
-    <p class="analysis-note">Union counts each normalized allele once. Ortholog support is the maximum in one gene–strategy context, never a sum across strategies. Both enabled filters must pass; the ortholog threshold need only pass in one context. Strategy agreement is not independent biological replication.</p>
     <div class="metric-grid" id="pathogenic-metrics"></div>
     <h3>ClinVar review stars</h3><div id="pathogenic-stars" class="analysis-plot"></div>
     <h3>Molecular effect</h3><div id="pathogenic-consequences" class="analysis-plot"></div>
-    <h3>Supporting orthologs among P/LP hits</h3><p>SNVs only; one observation per allele and displayed group. Counts use a logarithmic axis.</p>
+    <h3>Supporting orthologs among P/LP hits</h3><p>SNVs only.</p>
     <div id="pathogenic-support" class="analysis-plot"></div>
     <h3>Associated conditions</h3>
     <div class="analysis-controls" id="pathogenic-condition-controls">
@@ -96,9 +95,8 @@ def build_pathogenic_variant_sections(analysis: PathogenicVariantAnalysis) -> li
       <label>Sort conditions by<select data-role="sort"><option value="gaph">GAPH fraction</option><option value="clinvar">ClinVar fraction</option><option value="absolute-difference">Absolute GAPH − ClinVar difference</option></select></label>
       <label>Find condition<input data-role="search" type="search" placeholder="Condition name"></label>
     </div>
-    <p>Fractions include alleles without a named condition. An allele may have multiple conditions. The target background uses the original eligible genes and does not shrink with support filters.</p>
+    <p>An allele may have multiple conditions.</p>
     <div id="pathogenic-conditions-plot" class="analysis-plot"></div>
-    <details><summary>Interpretation of cross-species evidence</summary><p>An ALT allele observed in another species does not establish benignity in humans. Selection reflects effects on survival and reproduction; late-onset and incompletely penetrant disease risks may therefore be poorly captured. Species differ in life history, environment and genetic background, including compensatory changes. These limitations do not make late-onset disorders or cancer predisposition non-pathogenic. See <a href="https://doi.org/10.1016/0022-5193(66)90184-6">Hamilton (1966)</a> and <a href="https://doi.org/10.1073/pnas.232565499">Kondrashov et al. (2002)</a>.</p></details>
     <style>
       #pathogenic-controls {grid-template-columns: minmax(180px,240px) minmax(180px,240px) minmax(260px,400px);max-width:1000px}
       #pathogenic-union-filters:not([hidden]) {display:grid;grid-template-columns:1fr 72px;gap:8px;align-items:center}

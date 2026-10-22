@@ -172,6 +172,10 @@ def test_pathogenic_analysis_builds_condition_backgrounds_and_unique_snv_support
     assert len(exported) == 2
     rendered = "".join(build_pathogenic_variant_sections(analysis))
     assert "Pathogenic ClinVar Hits" in rendered
+    assert 'class="analysis-note"' not in rendered
+    assert "OFFLINE SMOKE" not in rendered
+    assert "Union counts each normalized allele" not in rendered
+    assert "Interpretation of cross-species evidence" not in rendered
     assert "Primary sort" not in rendered
     qc = "".join(build_pathogenic_qc_sections(analysis))
     assert "Primary sort" in qc
@@ -432,7 +436,7 @@ def test_pathogenic_filtered_report_smoke(tmp_path: Path) -> None:
         eligible_gene_ids_by_strategy={'s1':{'1','2','3','4'},'s2':{'1','2','3','4','5'}},analytics_dir=derived)
     content = render_html([
         ('pathogenic-clinvar-hits','Pathogenic ClinVar Hits',[
-            '<p class="analysis-note">OFFLINE SMOKE · Synthetic test data: 5 genes, 6 P/LP alleles. This is not a scientific result.</p>',
+            '<p>Demo · 5 synthetic genes, 6 P/LP alleles.</p>',
             *build_pathogenic_variant_sections(analysis)]),
         ('qc','QC',build_pathogenic_qc_sections(analysis)),
     ])
