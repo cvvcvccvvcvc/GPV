@@ -90,15 +90,17 @@ def repaired_sql(base_sql: str, repair: dict, columns: tuple[str, ...]) -> str:
 
     lookup = sql_string(repair["lookup"])
     coverage = sql_string(repair["coverage"])
-    scope = (f"EXISTS (SELECT 1 FROM read_parquet({coverage}) c WHERE c.chrom=split_part(b.variant_key,':',1) "
-             "AND try_cast(split_part(b.variant_key,':',2) AS BIGINT) BETWEEN c.start1 AND c.end1")
-    eligible = f"b.lookup_status='ok' AND nullif(b.gnomad_af,'') IS NULL AND {scope})"
-    complete = scope + " AND c.complete)"
+    # Aggregate coverage once: repeated correlated EXISTS buffer the wide base
+    # rows separately, and joining raw overlapping regions would multiply them.
+    scope = (f"(SELECT count(*)>0 AS in_failed_region, coalesce(bool_or(c.complete),false) AS complete "
+             f"FROM read_parquet({coverage}) c WHERE c.chrom=split_part(b.variant_key,':',1) "
+             "AND try_cast(split_part(b.variant_key,':',2) AS BIGINT) BETWEEN c.start1 AND c.end1)")
+    eligible = "b.lookup_status='ok' AND nullif(b.gnomad_af,'') IS NULL AND coverage.in_failed_region"
     replacements = []
     for name in ["gnomad_af", "gnomad_af_source", "gnomad_csq"]:
         if name in columns:
             replacements.append(f"CASE WHEN ({eligible}) AND r.variant_key IS NOT NULL THEN coalesce(r.{name},'') ELSE b.{name} END AS {name}")
     status = (f"CASE WHEN ({eligible}) AND r.variant_key IS NOT NULL THEN 'found' "
-              f"WHEN ({eligible}) AND {complete} THEN 'not_found' ELSE '' END AS gnomad_lookup_status")
+              f"WHEN ({eligible}) AND coverage.complete THEN 'not_found' ELSE '' END AS gnomad_lookup_status")
     return (f"(SELECT b.* REPLACE ({','.join(replacements)}), {status} FROM {base_sql} b "
-            f"LEFT JOIN read_parquet({lookup}) r USING(variant_key))")
+            f"LEFT JOIN read_parquet({lookup}) r USING(variant_key) CROSS JOIN LATERAL {scope} coverage)")

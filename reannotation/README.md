@@ -101,6 +101,9 @@ Unresolved rows retain failed status. Summary, filtering, and ortholog-support
 calculations use the same explicit status. Cache identities and report provenance
 include the snapshot ID. Prepared Drive packs materialize the result once, so
 subsequent report reads do not repeatedly join the original large tables.
+Coverage is aggregated once per variant key before applying the overlay:
+overlapping failed regions must not multiply evidence rows, and repeated
+correlated checks must not buffer the wide source table for every output field.
 
 ## Checks
 
