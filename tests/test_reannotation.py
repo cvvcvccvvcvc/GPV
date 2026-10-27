@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import gzip
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import duckdb
@@ -131,8 +132,82 @@ def test_empty_response_only_resolves_fully_covered_region(tmp_path, archived):
     assert repaired_row(source, complete, tmp_path)[0] == ('', 'not_found')
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+def test_real_equivalent_deletions_retain_presence_without_choosing_af(tmp_path, archived, reverse):
+    from analytics.io.reannotation import CONFLICTS_FILENAME
+    from genomics.variants import normalize_vcf_key_for_context
+
+    _, binding, source = archived
+    case = json.loads((Path(__file__).parent / 'fixtures/gnomad_af_conflict.json').read_text())
+    context = {'begin': case['begin'], 'seq': case['sequence']}
+    records = [{**r, 'joint': {'an': r['an'], 'ac': r['ac']}, 'consequence': 'intron_variant'}
+               for r in case['records']]
+    keys = [f"{r['chrom']}:{r['pos']}:{r['ref']}>{r['alt']}" for r in records]
+    normalized = [normalize_vcf_key_for_context(context, r['chrom'], r['pos'], r['ref'], r['alt']) for r in records]
+    assert normalized[0] == normalized[1] and normalized[0][1] == 'ok'
+    genes = tmp_path / 'genes.tsv.gz'
+    targets = tmp_path / 'targets'
+    targets.mkdir()
+    _table(genes, ['gene_id', 'genomic_accession', 'chromosome', 'begin', 'end'],
+           [{'gene_id': '1', 'genomic_accession': 'NC_000021.9', 'chromosome': '21',
+             'begin': case['begin'], 'end': case['begin'] + len(case['sequence']) - 1}])
+    with gzip.open(targets / '1.fa.gz', 'wt') as handle:
+        handle.write('>1\n' + case['sequence'] + '\n')
+    base = tmp_path / 'variants.tsv.gz'
+    fields = ['variant_key', 'lookup_status', 'gnomad_af', 'gnomad_af_source', 'gnomad_csq']
+    _table(base, fields, [dict(zip(fields, [key, 'ok', '', '', ''])) for key in keys] +
+           [dict(zip(fields, [keys[0], 'ok', '0.3', 'original', 'original']))])
+    source = replace(source, genes_tsv=genes, target_sequences_dir=targets, variant_annotations_source=base)
+    binding = {**binding, 'regions': [['21', case['begin'], case['begin'] + len(case['sequence'])]],
+               'tiles': ['21:45900001:45925000']}
+    _, snapshot = make_snapshot(tmp_path / 'store', binding,
+                               {binding['tiles'][0]: (records[::-1] if reverse else records, WINDOW)})
+    before = digest(base)
+    repaired = prepare_repaired_source(source, snapshot, tmp_path / 'views')
+    variants = resolve_variant_table_source(repaired.variant_annotations_source, required_columns={'variant_key'})
+    with duckdb.connect() as con:
+        rows = con.sql(f'SELECT gnomad_af,gnomad_af_source,gnomad_lookup_status FROM {variant_source_sql(variants)}').fetchall()
+        assert sorted(rows) == [('', '', 'found'), ('', '', 'found'), ('0.3', 'original', '')]
+        evidence = con.read_parquet(str(repaired.variant_annotations_source.parent / CONFLICTS_FILENAME)).df()
+        assert set(evidence.source_variant_key) == set(keys)
+        assert set(evidence.gnomad_af.astype(float)) == {227 / 153504, 84 / 105556}
+        assert set(evidence.reason) == {'af_conflict'}
+    assert digest(base) == before
+    assert prepare_repaired_source(source, snapshot, tmp_path / 'views') == repaired
+
+
+def test_conflict_evidence_survives_preparation_and_discard(tmp_path, archived, monkeypatch):
+    import shutil
+    from analytics.io import archive_sources
+    from analytics.io.reannotation import CONFLICTS_FILENAME, preserve_supplement_conflicts
+
+    _, binding, source = archived
+    _, snapshot = make_snapshot(tmp_path / 'store', binding,
+                               {binding['tiles'][0]: ([record(), record(af=0.02)], WINDOW)})
+    monkeypatch.setattr(archive_sources, 'resolve_alignment_aggregate_paths', lambda *a, **kw: None)
+    monkeypatch.setattr(archive_sources, 'resolve_taxonomy_summary_path', lambda *a, **kw: None)
+    def support(*args, analytics_dir, **kwargs):
+        _table(analytics_dir / 'annotation_support/variant_strategy_support.tsv.gz',
+               ['variant_key'], [{'variant_key': '1:2:A>G'}])
+    monkeypatch.setattr(archive_sources, 'resolve_annotation_support_paths', support)
+    pack = tmp_path / 'prepared'
+    archive_sources.prepare_source_pack(source, pack, workers=1, gnomad_reannotation=snapshot)
+    assert not (pack / 'repair').exists()
+    diagnostic = pack / 'derived' / CONFLICTS_FILENAME
+    before = digest(diagnostic)
+    prepared = replace(source, run_dir=pack, prepared_cache_dir=pack / 'derived',
+                       variant_annotations_source=pack / 'variant_rows/manifest.json')
+    summaries = preserve_supplement_conflicts([prepared], tmp_path / 'analysis')
+    assert summaries[0]['Conflicting lookup keys'] == 1
+    assert summaries[0]['Observations'] == 2
+    shutil.rmtree(pack)
+    assert digest(Path(summaries[0]['Evidence'])) == before
+
+
 @pytest.mark.parametrize('observations,expected', [({}, 'lookup_failed'),
     ({'1:1:25000': ([record()], WINDOW)}, 'found'),
+    ({'1:1:25000': ([record(), record(af=0.02)], WINDOW)}, 'found'),
+    ({'1:1:25000': ([record(), record(5), record(5, af=0.02)], WINDOW)}, 'found'),
     ({key: ([], WINDOW) for key in ['1:1:25000', '1:25001:50000', '1:50001:75000']}, 'not_found')])
 def test_summary_and_filtering_match_raw_and_materialized_supplements(tmp_path, archived, observations, expected):
     from analytics.analyses.variant_summary_aggregation import aggregate_variant_groups, resolve_variant_aggregation_source
@@ -151,6 +226,9 @@ def test_summary_and_filtering_match_raw_and_materialized_supplements(tmp_path, 
         result = aggregate_variant_groups(resolve_variant_aggregation_source(path),
                     annotation_failures_path=source.annotation_failures_tsv, threads=1)
         assert result.global_groups['gnomad_status'].tolist() == [status]
+        records = observations.get('1:1:25000', ([],))[0]
+        if len([r for r in records if r['pos'] == 2]) > 1:
+            assert result.gnomad_af_summary.empty
         scores, _, _ = build_or_load_filter_score_store(variant_annotations_source=path,
             variant_strategy_support_tsv=support, annotation_failures_tsv=source.annotation_failures_tsv,
             analytics_dir=tmp_path / f'filter{index}', strategies=['s1'],

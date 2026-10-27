@@ -543,6 +543,16 @@ def build_methods_sections(
                 'candidate lookup counts reflect the selected supplement. '
                 'Any unresolved coverage remains excluded.</p>'
             )
+        conflicts = software_provenance.get("gnomad_supplement_conflicts")
+        if conflicts:
+            sections.extend([
+                '<h3>gnomAD supplement AF conflicts</h3>',
+                '<p>Equivalent provider records disagree on allele frequency. Matching repaired candidates '
+                'remain found in gnomAD, with AF unavailable; they are excluded from AF statistics, '
+                'not classified as absent or as failed requests. Counts below describe supplement lookup keys '
+                'and include keys absent from report candidates. Evidence retains the original values and object identities.</p>',
+                table_html(pd.DataFrame(conflicts), classes="table table-sm table-striped"),
+            ])
         runtime = dict(software_provenance.get("runtime") or {})
         python_runtime = dict(runtime.get("python") or {})
         r_runtime = dict(runtime.get("R") or {})

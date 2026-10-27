@@ -492,6 +492,11 @@ def _build_report(
             "annotation_support_workers": args.annotation_support_workers,
         }
     candidate_annotation_descriptor = variant_annotation_descriptor(inputs)
+    supplement_conflicts = []
+    if scientific_config["gnomad_supplement"] is not None:
+        from analytics.io.reannotation import preserve_supplement_conflicts
+
+        supplement_conflicts = preserve_supplement_conflicts(source_runs, workspace.analysis_dir)
     analytics_dir = inputs.derived_dir
     heavy_dir = (
         analytics_dir if args.cache_policy == "keep"
@@ -792,6 +797,7 @@ def _build_report(
                         "runtime": calculation_identity["runtime"],
                         "code": code_provenance,
                         "gnomad_supplement": scientific_config["gnomad_supplement"],
+                        "gnomad_supplement_conflicts": supplement_conflicts,
                     },
                 ) + build_pathogenic_qc_sections(pathogenic_analysis),
             ),

@@ -160,9 +160,14 @@ def prepare_source_pack(source: SourceRun, destination: Path, *, workers: int, g
     """Retain report inputs and derivations, without raw alignment or event lineage."""
     derived = destination / "derived"
     if gnomad_reannotation is not None:
-        from analytics.io.reannotation import prepare_repaired_source
+        from analytics.io.reannotation import CONFLICTS_FILENAME, prepare_repaired_source
 
         source = prepare_repaired_source(source, gnomad_reannotation, destination / "repair")
+        repair = json.loads(source.variant_annotations_source.read_text())
+        if "conflicts" in repair:
+            derived.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source.variant_annotations_source.parent / repair["conflicts"]["path"],
+                         derived / CONFLICTS_FILENAME)
     resolve_alignment_aggregate_paths(source.run_dir, analytics_dir=derived)
     resolve_annotation_support_paths(source.run_dir, analytics_dir=derived, workers=workers,
                                      variant_annotations_override=source.variant_annotations_source)

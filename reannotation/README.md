@@ -105,6 +105,18 @@ Coverage is aggregated once per variant key before applying the overlay:
 overlapping failed regions must not multiply evidence rows, and repeated
 correlated checks must not buffer the wide source table for every output field.
 
+Equivalent provider records can disagree on AF or its source. Such lookup keys
+remain present (`found`) but contribute no numeric AF; they are not absence or
+failed requests. No value is selected by maximum, average, or input order.
+Only the conflicting AF fields are withheld; successful original annotations
+remain immutable. Small conflict tables retain original provider keys, values,
+tile and object identities. The report's QC section lists these tables under
+`gnomad_supplement_conflicts/` in the analysis directory, outside discard cleanup.
+Their counts include supplement keys absent from source candidates.
+Previously completed conflict-free packs remain valid: their values, schema,
+and calculation identity are unchanged. Resume reuses them without refetching
+gnomAD or rerunning the pipeline.
+
 ## Checks
 
 `tests/test_reannotation.py` exercises archive-only planning, source immutability,
