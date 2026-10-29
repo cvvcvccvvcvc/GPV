@@ -156,8 +156,14 @@ scopes, ranks, and plotting tables never become pipeline source data.
 ClinVar and gnomAD record fields are allele-level. Repeated gene-context rows
 are reconciled by canonical `variant_key`: a successful non-empty value is
 shared, while conflicting non-empty values or a non-numeric gnomAD allele
-frequency fail. VEP consequences, target context, and lookup outcome remain
-gene-context evidence.
+frequency fail. The pipeline publishes AF with six significant digits;
+supplements retain full precision. One precise AF and its exact six-digit
+round-trip are compatible, and reconciliation retains that precise value.
+Distinct precise values still conflict even if they round alike; there is no
+arbitrary tolerance or choice between them. This reconciliation reads existing
+prepared packs unchanged. Previously successful reconciliations are unchanged,
+so their cache identities remain valid. VEP consequences, target context, and
+lookup outcome remain gene-context evidence.
 
 The indexed ClinVar VCF used for validation must match the portable content
 identity recorded by every source run. It may be located at a different path

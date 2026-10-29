@@ -776,9 +776,16 @@ def test_analysis_rejects_previous_root_manifest_schema(tmp_path: Path) -> None:
         resolve_source_runs([run], clinvar_vcf=clinvar)
 
 
+@pytest.mark.parametrize("af_a,af_b", [
+    ("0.01", "0.02"),
+    ("1.2218068079075337e-05", "1.221807e-05"),
+    ("1.22181e-05", "1.22182e-05"),
+])
 def test_analysis_rejects_conflicting_shared_allele_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    af_a: str,
+    af_b: str,
 ) -> None:
     clinvar = tmp_path / "clinvar.vcf.gz"
     clinvar.write_bytes(b"clinvar")
@@ -788,14 +795,14 @@ def test_analysis_rejects_conflicting_shared_allele_evidence(
         gene_id="1",
         clinvar_vcf=clinvar,
         variant_key="1:100:A>G",
-        gnomad_af="0.01",
+        gnomad_af=af_a,
     )
     run_b = _make_source_run(
         tmp_path / "run-b",
         gene_id="2",
         clinvar_vcf=clinvar,
         variant_key="1:100:A>G",
-        gnomad_af="0.02",
+        gnomad_af=af_b,
     )
     _stub_derived_builders(monkeypatch)
     sources = resolve_source_runs([run_a, run_b], clinvar_vcf=clinvar)
@@ -807,6 +814,52 @@ def test_analysis_rejects_conflicting_shared_allele_evidence(
             scientific_config={"test": True},
             calculation_identity=TEST_CALCULATION_IDENTITY,
         )
+
+
+@pytest.mark.parametrize("precise,rounded", [
+    ("1.2218068079075337e-05", "1.22181e-05"),
+    ("5.110841372260908e-05", "5.11084e-05"),
+    ("6.36634495403499e-06", "6.36634e-06"),
+    ("6.388878240758487e-06", "6.38888e-06"),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_analysis_reconciles_pipeline_af_rounding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    precise: str, rounded: str, reverse: bool,
+) -> None:
+    import duckdb
+    from analytics.io.allele_evidence import materialize_allele_evidence
+    from analytics.io.variant_source import resolve_variant_table_source, variant_source_sql
+
+    clinvar = tmp_path / "clinvar.vcf.gz"
+    clinvar.write_bytes(b"clinvar")
+    Path(f"{clinvar}.tbi").write_bytes(b"index")
+    values = [precise, rounded, ""]
+    if reverse:
+        values.reverse()
+    runs = [
+        _make_source_run(tmp_path / f"run-{i}", gene_id=str(i),
+                         clinvar_vcf=clinvar, variant_key="1:100:A>G", gnomad_af=af)
+        for i, af in enumerate(values, 1)
+    ]
+    before = {run: _snapshot(run) for run in runs}
+    _stub_derived_builders(monkeypatch)
+    inputs = build_analysis_inputs(
+        resolve_source_runs(runs, clinvar_vcf=clinvar),
+        analytics_root=tmp_path / "analytics", scientific_config={"test": True},
+        calculation_identity=TEST_CALCULATION_IDENTITY,
+    )
+    source = resolve_variant_table_source(
+        inputs.variant_annotation_sources, required_columns={"variant_key", "gnomad_af"},
+    )
+    with duckdb.connect() as connection:
+        connection.execute(f"CREATE VIEW source_rows AS SELECT * FROM {variant_source_sql(source)}")
+        materialize_allele_evidence(connection, relation="source_rows", key="variant_key",
+                                    fields=("gnomad_af",))
+        assert connection.execute(
+            "SELECT gnomad_af, gnomad_af_value FROM allele_evidence"
+        ).fetchone() == (precise, float(precise))
+    assert {run: _snapshot(run) for run in runs} == before
 
 
 def test_analysis_root_must_be_outside_source_run(

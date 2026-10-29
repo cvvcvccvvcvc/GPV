@@ -21,7 +21,20 @@ def allele_evidence_conflict_sql(field: str, *, alias: str = "") -> str:
     """Return a constant-state aggregate that detects multiple canonical values."""
 
     value = allele_evidence_comparison_sql(field, alias=alias)
+    if field == "gnomad_af":
+        rounded, precise = _gnomad_af_precision_sql(value)
+        return (
+            f"(min({rounded}) IS DISTINCT FROM max({rounded}) OR "
+            f"min({precise}) IS DISTINCT FROM max({precise}))"
+        )
     return f"min({value}) IS DISTINCT FROM max({value})"
+
+
+def _gnomad_af_precision_sql(value: str) -> tuple[str, str]:
+    # annotate_events.format_float publishes six significant digits. Accept its
+    # rounded value alongside one precise value, never two distinct precise AFs.
+    rounded = f"try_cast(printf('%.6g', {value}) AS DOUBLE)"
+    return rounded, f"CASE WHEN {value} <> {rounded} THEN {value} END"
 
 
 def materialize_allele_evidence(
@@ -33,8 +46,15 @@ def materialize_allele_evidence(
 ) -> None:
     if "gnomad_af" not in fields:
         raise ValueError("Allele evidence materialization requires gnomad_af")
+    af_value = allele_evidence_comparison_sql("gnomad_af")
+    _, precise_af = _gnomad_af_precision_sql(af_value)
+    af_text = (
+        f"coalesce(max(nullif(gnomad_af, '')) FILTER (WHERE {precise_af} IS NOT NULL), "
+        "max(nullif(gnomad_af, '')))"
+    )
     resolved = ", ".join(
-        f"max(nullif({field}, '')) AS {field}" for field in fields
+        f"{af_text} AS gnomad_af" if field == "gnomad_af"
+        else f"max(nullif({field}, '')) AS {field}" for field in fields
     )
     conflict_checks = ", ".join(
         f"({allele_evidence_conflict_sql(field)}) AS {field}_conflict"
@@ -47,7 +67,7 @@ def materialize_allele_evidence(
     )
     connection.execute(
         f"CREATE TEMP TABLE allele_evidence AS SELECT {key}, "
-        f"{resolved}, max(try_cast(nullif(gnomad_af, '') AS DOUBLE)) "
+        f"{resolved}, coalesce(max({precise_af}), max({af_value})) "
         f"AS gnomad_af_value, {conflict_checks}, {invalid_af} "
         f"FROM {relation} GROUP BY {key}"
     )
