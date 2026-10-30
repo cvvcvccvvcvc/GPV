@@ -71,17 +71,6 @@ STRATEGY_LABELS = {
     "nucmer": "nucmer",
 }
 
-TAXONOMIC_SCOPE_ORDER = [
-    "all",
-    "eukaryota",
-    "metazoa",
-    "vertebrata",
-    "tetrapoda",
-    "amniota",
-    "mammalia",
-    "primates",
-]
-
 TAXONOMIC_SCOPE_LABELS = {
     "all": "All selected",
     "eukaryota": "Eukaryota",
@@ -92,8 +81,6 @@ TAXONOMIC_SCOPE_LABELS = {
     "mammalia": "Mammalia",
     "primates": "Primates",
 }
-
-EVIDENCE_UNIT_ORDER = ["ortholog", "species", "genus", "family", "order"]
 
 EVIDENCE_UNIT_LABELS = {
     "ortholog": "Ortholog",

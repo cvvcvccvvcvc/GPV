@@ -177,6 +177,9 @@ cache identity. Local VEP is probed before an analysis workspace is created.
 
 ## Report Semantics
 
+Ortholog support and taxonomy are shared inputs to support filters, scientific
+summaries, and QC. Their preparation is independent of the report's tab list.
+
 ### Strategy Concordance
 
 Candidate Profile retains the pairwise Jaccard matrix and adds one interactive

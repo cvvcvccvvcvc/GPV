@@ -58,7 +58,6 @@ from analytics.reporting.basic_filtering import build_basic_filtering_sections
 from analytics.reporting.conservation import build_clinvar_association_sections
 from analytics.reporting.document import render_html
 from analytics.reporting.matched_control import build_target_space_null_sections
-from analytics.reporting.ortholog_evidence import build_ortholog_evidence_sections
 from analytics.reporting.overview import build_overview, merge_alignment_summary
 from analytics.reporting.pathogenic_variants import build_pathogenic_variant_sections, build_pathogenic_qc_sections
 from analytics.reporting.qc import build_methods_sections
@@ -744,14 +743,6 @@ def _build_report(
                 "basic-filtering",
                 "Basic Filtering",
                 build_basic_filtering_sections(basic_filtering),
-            ),
-            (
-                "ortholog-evidence",
-                "Ortholog Evidence",
-                build_ortholog_evidence_sections(
-                    variant_summary,
-                    taxonomy_summary=taxonomy_summary,
-                ),
             ),
             (
                 "gnomad-stratification",

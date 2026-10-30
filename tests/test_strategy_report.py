@@ -31,12 +31,6 @@ from analytics.reporting.matched_control import (
     build_target_space_null_sections,
 )
 from analytics.reporting.document import render_html
-from analytics.reporting.ortholog_evidence import (
-    build_ortholog_evidence_sections,
-    ortholog_evidence_distribution_figure,
-    ortholog_evidence_distribution_stats,
-    ortholog_evidence_figure,
-)
 from analytics.reporting.overview import overview_strategy_table
 from analytics.reporting.pathogenic_variants import pathogenic_variant_table_html
 from analytics.reporting.qc import vep_qc_tables
@@ -633,99 +627,6 @@ def test_report_document_loads_plotly_once() -> None:
 
     assert html.count("cdn.plot.ly") == 1
 
-
-def test_ortholog_evidence_section_renders_three_context_heatmaps() -> None:
-    cells = pd.DataFrame(
-        [
-            {
-                "strategy": "s1",
-                "target_context": context,
-                "taxonomic_scope": "all",
-                "evidence_unit": "ortholog",
-                "quantile_count": quantile_count,
-                "depth_bin": 0,
-                "alt_bin": 0,
-                "depth_label": "1-4",
-                "alt_label": "1-2",
-                "gnomad_found_count": 1,
-                "gnomad_eligible_count": 2,
-                "gnomad_found_fraction": 0.5,
-            }
-            for context in ["cds", "utr", "intron"]
-            for quantile_count in [2, 4, 10]
-        ]
-    )
-    distributions = pd.DataFrame(
-        [
-            {
-                "strategy": "s1",
-                "taxonomic_scope": "all",
-                "evidence_unit": "ortholog",
-                "metric": metric,
-                "value": value,
-                "variant_count": count,
-            }
-            for metric, values in {
-                "site_aligned": [(1, 1), (4, 3)],
-                "exact_alt": [(0, 2), (2, 2)],
-            }.items()
-            for value, count in values
-        ]
-    )
-    summary = SimpleNamespace(
-        ortholog_evidence_cells=cells,
-        ortholog_evidence_distributions=distributions,
-        strategies=["s1", "minimap2_asm20"],
-    )
-    taxonomy_summary = pd.DataFrame(
-        [
-            {
-                "taxonomic_scope": "all",
-                "evidence_unit": "ortholog",
-                "ortholog_count": 100,
-                "taxon_count": 20,
-                "orthologs_per_gene_median": 50.0,
-                "units_per_gene_median": 50.0,
-                "unit_count": 100,
-            }
-        ]
-    )
-
-    figure = ortholog_evidence_figure(cells, "s1", 2)
-    distribution_figure = ortholog_evidence_distribution_figure(distributions, "s1")
-    distribution_stats = ortholog_evidence_distribution_stats(
-        distributions,
-        "s1",
-        "all",
-        "ortholog",
-    )
-    html = "".join(
-        build_ortholog_evidence_sections(
-            summary,
-            taxonomy_summary=taxonomy_summary,
-        )
-    )
-
-    assert len(figure.data) == 3
-    assert len(distribution_figure.data) == 2
-    assert all(float(trace.y[-1]) == 1.0 for trace in distribution_figure.data)
-    assert distribution_stats == [
-        {"label": "SNVs", "value": "4"},
-        {"label": "Site-aligned median [IQR]", "value": "4 [1-4]"},
-        {"label": "Exact-ALT median [IQR]", "value": "0 [0-2]"},
-    ]
-    assert [annotation.text for annotation in figure.layout.annotations] == ["CDS", "UTR", "Intron"]
-    assert "Median" in html
-    assert "Quartiles" in html
-    assert "Deciles" in html
-    assert "Taxonomic scope" in html
-    assert "Evidence unit" in html
-    assert "Exact-ALT support" in html
-    assert "Evidence distributions" in html
-    assert "Cumulative SNVs at or below X" in html
-    assert "Median selected orthologs/gene: 50.0" in html
-    assert "taxonomy unavailable" in html
-    assert "Plotly.react('ortholog-evidence-plot'" in html
 
 def test_overview_reports_strategy_gene_completeness_and_gnomad_eligible_denominator() -> None:
     summary = SimpleNamespace(
