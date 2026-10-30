@@ -74,9 +74,19 @@ REPORT_VARIANT_FIELDS = [
 ]
 
 
+@pytest.mark.parametrize(
+    ("options", "gnomad_stratification"),
+    [
+        ([], False),
+        (["--gnomad-stratification"], True),
+        (["--gnomad-stratification", "--no-gnomad-stratification"], False),
+    ],
+)
 def test_report_cli_has_one_workspace_and_repeatable_run_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    options: list[str],
+    gnomad_stratification: bool,
 ) -> None:
     monkeypatch.setattr(
         "sys.argv",
@@ -90,6 +100,7 @@ def test_report_cli_has_one_workspace_and_repeatable_run_inputs(
             str(tmp_path / "run-b"),
             "--report-name",
             "combined",
+            *options,
         ],
     )
 
@@ -98,6 +109,8 @@ def test_report_cli_has_one_workspace_and_repeatable_run_inputs(
     assert args.analytics_root == tmp_path / "analytics"
     assert args.run_dir == [tmp_path / "run-a", tmp_path / "run-b"]
     assert args.report_name == "combined"
+    assert args.gnomad_stratification is gnomad_stratification
+    assert args.target_space_null is False
     assert not hasattr(args, "out_html")
     assert not hasattr(args, "cohort_manifest")
 
@@ -681,7 +694,8 @@ def test_gnomad_stratification_places_found_and_not_found_bars_side_by_side() ->
     assert list(figure.data[0].y) == [0.75, 0.25]
 
 
-def test_gnomad_stratification_uses_vep_consequence_groups(tmp_path: Path) -> None:
+@pytest.mark.parametrize("enabled", [False, True])
+def test_gnomad_stratification_uses_vep_consequence_groups(tmp_path: Path, enabled: bool) -> None:
     summary = SimpleNamespace(
         consequence_source="Ensembl VEP",
         gnomad_event_counts=pd.DataFrame(),
@@ -713,11 +727,18 @@ def test_gnomad_stratification_uses_vep_consequence_groups(tmp_path: Path) -> No
     )
 
     sections = build_gnomad_stratification_sections(
-        summary,
-        pd.DataFrame([{"Strategy": "s1", "gnomAD found %": 0.5}]),
-        candidate,
+        summary if enabled else SimpleNamespace(),
+        pd.DataFrame([{"Strategy": "s1", "gnomAD found %": 0.5}]) if enabled else pd.DataFrame(),
+        candidate if enabled else SimpleNamespace(),
+        enabled=enabled,
     )
     rendered = "".join(sections)
+
+    if not enabled:
+        assert "was disabled for this report run" in rendered
+        assert "--gnomad-stratification" in rendered
+        assert "Plotly" not in rendered
+        return
 
     assert "Ensembl VEP consequence: gnomAD hits versus non-hits" in rendered
     assert "Not annotated" in rendered

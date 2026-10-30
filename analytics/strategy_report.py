@@ -114,6 +114,12 @@ def parse_args() -> argparse.Namespace:
         help="Report file name inside the analysis reports directory.",
     )
     parser.add_argument(
+        "--gnomad-stratification",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Include gnomAD stratification plots from shared analysis results. Disabled by default.",
+    )
+    parser.add_argument(
         "--target-space-null",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -751,6 +757,7 @@ def _build_report(
                     variant_summary,
                     strategy_stats_full,
                     conservation_analysis.candidate,
+                    enabled=args.gnomad_stratification,
                 ),
             ),
             (

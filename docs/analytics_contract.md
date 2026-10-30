@@ -180,6 +180,12 @@ cache identity. Local VEP is probed before an analysis workspace is created.
 Ortholog support and taxonomy are shared inputs to support filters, scientific
 summaries, and QC. Their preparation is independent of the report's tab list.
 
+gnomAD Stratification is opt-in via `--gnomad-stratification`. When disabled,
+its tab shows the enable option without building plots, as Matched Control does.
+The flag controls presentation only: shared variant summaries and phyloP
+calculations remain available to ClinVar Association and QC, and scientific
+cache identity is unchanged.
+
 ### Strategy Concordance
 
 Candidate Profile retains the pairwise Jaccard matrix and adds one interactive

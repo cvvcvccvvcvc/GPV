@@ -148,7 +148,9 @@ bash analytics/slurm/submit_strategy_report.sh \
 ```
 
 The target-space null is opt-in because it may perform additional VEP and
-gnomAD work. The report CLI is the source of truth for scientific and
+gnomAD work. To include the optional gnomAD Stratification plots, pass
+`--gnomad-stratification` after the launcher's `--` separator.
+The report CLI is the source of truth for scientific and
 calculation-worker options:
 
 ```bash

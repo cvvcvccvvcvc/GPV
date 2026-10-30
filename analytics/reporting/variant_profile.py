@@ -678,10 +678,18 @@ def build_gnomad_stratification_sections(
     variant_summary: VariantSummary,
     strategy_stats: pd.DataFrame,
     candidate_conservation: CandidateConservation,
+    *,
+    enabled: bool = True,
 ) -> list[str]:
     sections = [
         "<h2>gnomAD Stratification</h2>",
     ]
+    if not enabled:
+        sections.append(
+            "<p>gnomAD Stratification was disabled for this report run. Enable it with "
+            "<code>--gnomad-stratification</code>.</p>"
+        )
+        return sections
     strategy_order = sort_by_metric(
         strategy_stats[["Strategy", "gnomAD found %"]], "gnomAD found %"
     )["Strategy"].tolist()
