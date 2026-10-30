@@ -294,10 +294,10 @@ are excluded and shown separately on hover. An empty eligible denominator
 produces a missing fraction, not zero. Presence in gnomAD is population overlap,
 not a clinical benignity label or a calibrated measure of calling accuracy.
 
-Both plots default to a logarithmic threshold axis on `N + 1`, keeping threshold
-zero visible. Tick labels and hover report the original threshold `N`; a shared
-linear-scale option is available. The retained fraction and gnomAD fraction
-remain on linear percentage axes.
+Candidate retention defaults to a logarithmic threshold axis on `N + 1`, keeping
+threshold zero visible; its scale selector can switch to linear. Tick labels
+and hover report the original threshold `N`. The gnomAD threshold axis always
+uses linear, unshifted `N`. Both fractions remain on linear percentage axes.
 
 ## Code Owners And Checks
 

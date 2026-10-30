@@ -44,18 +44,14 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
       <label>Variant type<select data-role="variant-type"></select></label>
       <label>Target context<select data-role="target-context"></select></label>
       <label>Consequence (VEP)<select data-role="consequence"></select></label>
-      <label>Threshold scale<select data-role="threshold-scale"><option value="log">Logarithmic (N + 1)</option><option value="linear">Linear</option></select></label>
     </div>
     <div class="analysis-controls analysis-controls-single" id="basic-filtering-candidate-controls">
       <label>Strategies<select data-role="candidate-strategy"></select></label>
+      <label>Retention threshold scale<select data-role="threshold-scale"><option value="log">Logarithmic (N + 1)</option><option value="linear">Linear</option></select></label>
     </div>
     <div id="basic-filtering-candidate-status" class="analysis-note" hidden></div>
     <div id="basic-filtering-retention" class="analysis-plot"></div>
     <div id="basic-filtering-gnomad" class="analysis-plot"></div>
-    <p class="analysis-note">Consequences use candidate VEP terms and may overlap (for example, synonymous and splice region).
-    Context and consequence must match the same target-gene row; each allele is counted once per selection.
-    gnomAD presence describes population overlap, not clinical benignity. Failed lookups are excluded only from its denominator.
-    The logarithmic view uses N + 1 so threshold zero remains visible; ticks and hover show N.</p>
     <script>(() => {
       const config = """
         + payload_json
@@ -80,8 +76,8 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
       const commonRows = row => row.filter_key === selects.filter.value && row.variant_type === selects['variant-type'].value
         && row.target_context === selects['target-context'].value && row.consequence === selects.consequence.value;
       const logarithmic = () => selects['threshold-scale'].value === 'log';
-      const xaxis = (groups) => {
-        if (!logarithmic()) return {title: {text: 'Threshold (' + symbol() + ' N)'}, type: 'linear', rangemode: 'tozero'};
+      const xaxis = (groups, logScale) => {
+        if (!logScale) return {title: {text: 'Threshold (' + symbol() + ' N)'}, type: 'linear', rangemode: 'tozero'};
         const max = Math.max(1, ...groups.map(group => group.rows.length ? group.rows[group.rows.length - 1].threshold : 0));
         const ticks = [0];
         for (let power = 1; power <= max; power *= 10) {
@@ -100,9 +96,9 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
         const strategies = selection === 'compare' ? config.strategies.map(item => item.key) : [selection];
         const groups = strategies.map(strategy => ({strategy, rows: config.candidate.filter(row =>
           supported() && commonRows(row) && row.strategy === strategy).sort((a, b) => a.threshold - b.threshold)}));
-        const traces = (gnomad) => groups.filter(group => group.rows.length).map(({strategy, rows}) => ({
+        const traces = (gnomad, logScale) => groups.filter(group => group.rows.length).map(({strategy, rows}) => ({
           type: 'scatter', mode: 'lines', name: labels[strategy], line: {color: color(strategy), width: 2, shape: 'hv'},
-          connectgaps: false, x: rows.map(row => logarithmic() ? row.threshold + 1 : row.threshold),
+          connectgaps: false, x: rows.map(row => logScale ? row.threshold + 1 : row.threshold),
           y: rows.map(row => gnomad ? row.gnomad_found_fraction : row.retained_fraction),
           customdata: rows.map(row => gnomad
             ? [row.threshold, count(row.gnomad_found_count), count(row.gnomad_eligible_count), count(row.gnomad_lookup_failed_count)]
@@ -115,9 +111,10 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
           ['retention', false, 'Candidate alleles retained', 'Fraction retained'],
           ['gnomad', true, 'Exact alleles found in gnomAD', 'gnomAD found fraction'],
         ]) {
-          Plotly.react('basic-filtering-' + id, traces(gnomad), {
+          const logScale = !gnomad && logarithmic();
+          Plotly.react('basic-filtering-' + id, traces(gnomad, logScale), {
             title: {text: title}, template: 'plotly_white', height: 410, margin: {l: 72, r: 25, t: 55, b: 110},
-            xaxis: xaxis(groups), yaxis: {title: {text: ylabel}, tickformat: '.0%', range: [0, 1]},
+            xaxis: xaxis(groups, logScale), yaxis: {title: {text: ylabel}, tickformat: '.0%', range: [0, 1]},
             legend: {orientation: 'h', x: 0, y: -0.3, yanchor: 'top'},
           }, {responsive: true});
         }
