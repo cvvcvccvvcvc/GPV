@@ -46,11 +46,7 @@ def test_set_overlap_from_rows_and_warm_cache(tmp_path: Path) -> None:
             'vep_status': 'ok', 'vep_primary_consequence': 'intron_variant'})
     annotations = tmp_path / 'annotations.tsv.gz'
     pd.DataFrame(rows).to_csv(annotations, sep='\t', index=False)
-    evidence = tmp_path / 'ortholog.tsv.gz'
-    pd.DataFrame(columns=['strategy', 'target_context', 'taxonomic_scope', 'evidence_unit',
-        'site_aligned_count', 'alt_support_count', 'gnomad_found_count',
-        'gnomad_not_found_count', 'gnomad_lookup_failed_count']).to_csv(evidence, sep='\t', index=False)
-    kwargs = dict(strategy_label=str, ortholog_evidence_summary_path=evidence)
+    kwargs = dict(strategy_label=str)
     summary = build_variant_summary(annotations, tmp_path / 'derived', **kwargs)
     cached = build_variant_summary(annotations, tmp_path / 'derived', **kwargs)
     assert cached.cache_hit

@@ -370,20 +370,9 @@ def test_report_preflight_accepts_compact_production_contract(tmp_path: Path) ->
             "strategy",
             "alt_support_row_count",
             "alt_support_ortholog_count",
-            "alt_support_family_count",
+            "human_lineage_depth",
         ],
     )
-    evidence_columns = [
-        "strategy",
-        "target_context",
-        "taxonomic_scope",
-        "evidence_unit",
-        "site_aligned_count",
-        "alt_support_count",
-        "gnomad_found_count",
-        "gnomad_not_found_count",
-        "gnomad_lookup_failed_count",
-    ]
     taxonomy_columns = [
         "taxonomic_scope",
         "evidence_unit",
@@ -394,10 +383,6 @@ def test_report_preflight_accepts_compact_production_contract(tmp_path: Path) ->
         "orthologs_per_gene_median",
         "units_per_gene_median",
     ]
-    ortholog_evidence = write_table(
-        "ortholog_evidence_summary.tsv.gz",
-        evidence_columns,
-    )
     taxonomy_summary = write_table("taxonomy_summary.tsv.gz", taxonomy_columns)
     targets = tmp_path / "targets"
     targets.mkdir()
@@ -406,17 +391,12 @@ def test_report_preflight_accepts_compact_production_contract(tmp_path: Path) ->
         target_features_tsvs=(features,),
         variant_annotation_sources=(annotations,),
         variant_strategy_support_tsvs=(support,),
-        ortholog_evidence_summary_tsvs=(ortholog_evidence,),
         feature_coverage_tsvs=(coverage,),
         strategy_summary_tsvs=(summary,),
         taxonomy_summary_tsv=taxonomy_summary,
     )
 
     validate_report_inputs(inputs)
-    ortholog_evidence.unlink()
-    with pytest.raises(FileNotFoundError, match="ortholog_evidence_summary"):
-        validate_report_inputs(inputs)
-    write_table("ortholog_evidence_summary.tsv.gz", evidence_columns)
     taxonomy_summary.unlink()
     with pytest.raises(FileNotFoundError, match="taxonomy_summary"):
         validate_report_inputs(inputs)
@@ -993,8 +973,10 @@ def test_basic_filtering_view_has_shared_selectors_and_log_thresholds(
         assert f'data-role="{role}"' in html
     assert "ClinVar association" not in html
     assert "config.clinvar" not in html
-    assert "Supporting families" in html
-    assert "Union (any strategy)" in html
+    assert "Supporting families" not in html
+    assert "Site-aligned orthologs" not in html
+    assert "Human-lineage taxonomy" in html
+    assert "Union (excluding minimap2 map-ont)" in html
     assert "type: 'log'" in html
     assert "type: 'linear'" in html
     assert "row.threshold + 1" in html

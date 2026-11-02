@@ -61,7 +61,9 @@ from analytics.reporting.matched_control import build_target_space_null_sections
 from analytics.reporting.overview import build_overview, merge_alignment_summary
 from analytics.reporting.pathogenic_variants import build_pathogenic_variant_sections, build_pathogenic_qc_sections
 from analytics.reporting.qc import build_methods_sections
+from analytics.derivations.taxonomy import lineage_ortholog_counts
 from analytics.reporting.variant_profile import (
+    build_lineage_profile_sections,
     build_clinvar_gnomad_sections,
     build_feature_sections,
     build_gnomad_stratification_sections,
@@ -534,7 +536,6 @@ def _build_report(
             genes_path=inputs.genes_tsvs,
             annotation_failures_path=inputs.annotation_failure_tsvs,
             variant_strategy_support_path=inputs.variant_strategy_support_tsvs,
-            ortholog_evidence_summary_path=inputs.ortholog_evidence_summary_tsvs,
             performance_profile=performance,
         )
         timing["details"] = "cache hit" if variant_summary.cache_hit else "cache miss"
@@ -687,6 +688,13 @@ def _build_report(
         }
     write_tsv_atomic(analytics_dir / "basic_filtering" / "candidate_curves.tsv.gz", basic_filtering.candidate_curves)
 
+    with performance.stage("Human-lineage ortholog counts"):
+        lineage_counts = pd.DataFrame(lineage_ortholog_counts(
+            tuple(source.taxonomy_tsv for source in source_runs),
+            tuple(source.orthologs_selected_tsv for source in source_runs),
+        ))
+        write_tsv_atomic(analytics_dir / "basic_filtering" / "lineage_ortholog_counts.tsv.gz", lineage_counts)
+
     negative_controls = None
     if args.target_space_null:
         print("Computing consequence-matched target-space null...")
@@ -727,6 +735,7 @@ def _build_report(
             build_clinvar_gnomad_sections(variant_summary, strategy_stats_full)
         )
         candidate_sections.extend(build_feature_sections(cov))
+        candidate_sections.extend(build_lineage_profile_sections(basic_filtering, lineage_counts))
         sections = [
             (
                 "overview",

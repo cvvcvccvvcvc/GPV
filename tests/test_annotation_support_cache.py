@@ -20,11 +20,8 @@ from analytics.io.annotation_support import (
     build_or_load_annotation_support,
     resolve_annotation_support_paths,
 )
-from analytics.derivations.ortholog_evidence import write_ortholog_evidence_summary
 from analytics.derivations.support import (
-    ORTHOLOG_EVIDENCE_FIELDS,
     VARIANT_STRATEGY_SUPPORT_FIELDS,
-    merge_ortholog_evidence,
 )
 from analytics.derivations.taxonomy import (
     COUNT_KEYS,
@@ -381,7 +378,6 @@ def _write_source_contract(run_dir: Path) -> dict[str, object]:
     }
 
 
-@pytest.mark.skipif(not BEDTOOLS_AVAILABLE, reason="bedtools is not installed")
 def test_annotation_support_cache_reproduces_current_report_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -404,9 +400,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
         partition_dirs=[contract["partition"]],
         map_root=contract["map_root"],
         taxonomy=contract["taxonomy"],
-        target_features=contract["target_features"],
         variant_annotations_source=contract["source_annotations"],
-        failures=contract["failures"],
         alignment_manifest=contract["alignment_manifest"],
         annotation_manifest=contract["annotation_manifest"],
         analytics_dir=analytics_dir,
@@ -415,7 +409,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
     cache_manifest = json.loads(
         (analytics_dir / "annotation_support" / "manifest.json").read_text()
     )
-    assert cache_manifest["schema_version"] == 7
+    assert cache_manifest["schema_version"] == 8
     assert cache_manifest["exact_support"] == {
         "canonical_variant_count": 4,
         "canonical_support_edge_count": 8,
@@ -433,8 +427,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
             "strategy": "s1",
             "alt_support_row_count": "3",
             "alt_support_ortholog_count": "2",
-            "alt_support_family_count": "2",
-            "site_aligned_ortholog_count": "3",
+            "human_lineage_depth": "22",
         },
         {
             "variant_key": "1:103:C>T",
@@ -442,8 +435,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
             "strategy": "s1",
             "alt_support_row_count": "1",
             "alt_support_ortholog_count": "1",
-            "alt_support_family_count": "1",
-            "site_aligned_ortholog_count": "3",
+            "human_lineage_depth": "22",
         },
         {
             "variant_key": "1:104:G>A",
@@ -451,8 +443,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
             "strategy": "s1",
             "alt_support_row_count": "2",
             "alt_support_ortholog_count": "2",
-            "alt_support_family_count": "1",
-            "site_aligned_ortholog_count": "3",
+            "human_lineage_depth": "17",
         },
         {
             "variant_key": "1:105:AA>A",
@@ -460,121 +451,16 @@ def test_annotation_support_cache_reproduces_current_report_contract(
             "strategy": "s1",
             "alt_support_row_count": "4",
             "alt_support_ortholog_count": "2",
-            "alt_support_family_count": "",
-            "site_aligned_ortholog_count": "",
+            "human_lineage_depth": "22",
         },
     ]
 
-    evidence_rows = _read_rows(outputs.ortholog_evidence_summary_tsv)
-    assert list(evidence_rows[0]) == ORTHOLOG_EVIDENCE_FIELDS
-    by_key = {
-        (
-            row["target_context"],
-            row["taxonomic_scope"],
-            row["evidence_unit"],
-            row["site_aligned_count"],
-            row["alt_support_count"],
-        ): row
-        for row in evidence_rows
-    }
-    assert by_key[("cds", "all", "ortholog", "3", "2")][
-        "gnomad_found_count"
-    ] == "1"
-    assert by_key[("cds", "all", "ortholog", "3", "1")][
-        "gnomad_not_found_count"
-    ] == "1"
-    assert by_key[("utr", "all", "ortholog", "3", "2")][
-        "gnomad_lookup_failed_count"
-    ] == "1"
-    primate = by_key[("cds", "primates", "genus", "1", "1")]
-    assert primate["gnomad_found_count"] == "1"
-    assert primate["gnomad_not_found_count"] == "1"
-    assert (
-        "utr",
-        "primates",
-        "ortholog",
-        "1",
-        "0",
-    ) in by_key
-    assert all(
-        int(row["gnomad_found_count"])
-        + int(row["gnomad_not_found_count"])
-        + int(row["gnomad_lookup_failed_count"])
-        > 0
-        for row in evidence_rows
-    )
-
-    expected_depth = tmp_path / "expected_snv_taxonomic_depth.tsv.gz"
-    expected_alt = tmp_path / "expected_snv_alt_taxonomic_support.tsv.gz"
-    profiles = load_taxonomy_profiles(contract["taxonomy"])
-    site_counts = count_member_groups(
-        [("o1", "9598"), ("o2", "10090"), ("o3", "999999")],
-        profiles,
-    )
-    _write_tsv_gz(
-        expected_depth,
-        ["gene_id", "strategy", "target_start0", *COUNT_KEYS],
-        [
-            {
-                "gene_id": "1",
-                "strategy": "s1",
-                "target_start0": position,
-                **site_counts,
-            }
-            for position in (2, 3, 4)
-        ],
-    )
-    alt_members = {
-        2: [("o1", "9598"), ("o2", "10090")],
-        3: [("o1", "9598")],
-        4: [("o2", "10090"), ("o3", "999999")],
-    }
-    _write_tsv_gz(
-        expected_alt,
-        ["gene_id", "strategy", "target_start0", "ref", "alt", *COUNT_KEYS],
-        [
-            {
-                "gene_id": "1",
-                "strategy": "s1",
-                "target_start0": position,
-                "ref": ref,
-                "alt": alt,
-                **count_member_groups(alt_members[position], profiles),
-            }
-            for position, ref, alt in ((2, "A", "G"), (3, "C", "T"), (4, "G", "A"))
-        ],
-    )
-    expected_partition = tmp_path / "expected_partition"
-    expected_partition.mkdir()
-    expected_partition_evidence = expected_partition / "ortholog_evidence_summary.tsv.gz"
-    expected_partition_count = write_ortholog_evidence_summary(
-        expected_depth,
-        expected_alt,
-        [contract["target_features"]],
-        {
-            ("1", 2, "A", "G"): "found",
-            ("1", 3, "C", "T"): "not_found",
-            ("1", 4, "G", "A"): "lookup_failed",
-        },
-        expected_partition_evidence,
-    )
-    expected_evidence = tmp_path / "expected_ortholog_evidence_summary.tsv.gz"
-    merge_ortholog_evidence(
-        [
-            (
-                expected_partition,
-                {"ortholog_evidence_summary_count": expected_partition_count},
-            )
-        ],
-        expected_evidence,
-    )
-    assert _read_text(outputs.ortholog_evidence_summary_tsv) == _read_text(
-        expected_evidence
-    )
+    assert not list(analytics_dir.rglob("*ortholog_evidence*"))
+    assert not list(analytics_dir.rglob("snv_*"))
+    assert set(cache_manifest["timings_seconds"]).isdisjoint({"snv_site_depth", "snv_taxonomic_depth"})
 
 
-@pytest.mark.skipif(not BEDTOOLS_AVAILABLE, reason="bedtools is not installed")
-def test_annotation_support_cache_hit_and_failure_invalidation(tmp_path: Path) -> None:
+def test_annotation_support_cache_hit_and_taxonomy_invalidation(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     analytics_dir = tmp_path / "analytics"
     contract = _write_source_contract(run_dir)
@@ -582,9 +468,7 @@ def test_annotation_support_cache_hit_and_failure_invalidation(tmp_path: Path) -
         "partition_dirs": [contract["partition"]],
         "map_root": contract["map_root"],
         "taxonomy": contract["taxonomy"],
-        "target_features": contract["target_features"],
         "variant_annotations_source": contract["source_annotations"],
-        "failures": contract["failures"],
         "alignment_manifest": contract["alignment_manifest"],
         "annotation_manifest": contract["annotation_manifest"],
         "analytics_dir": analytics_dir,
@@ -594,24 +478,23 @@ def test_annotation_support_cache_hit_and_failure_invalidation(tmp_path: Path) -
     first_manifest = json.loads(cache_manifest.read_text())
     mtimes = (
         first.variant_strategy_support_tsv.stat().st_mtime_ns,
-        first.ortholog_evidence_summary_tsv.stat().st_mtime_ns,
     )
 
     second = build_or_load_annotation_support(**kwargs)
     assert second == first
     assert (
         second.variant_strategy_support_tsv.stat().st_mtime_ns,
-        second.ortholog_evidence_summary_tsv.stat().st_mtime_ns,
     ) == mtimes
 
-    _write_tsv_gz(contract["failures"], FAILURE_FIELDS, [])
+    rows = _read_rows(contract["taxonomy"])
+    rows[0]["scientific_name"] = "changed name"
+    _write_tsv_gz(contract["taxonomy"], list(rows[0]), rows)
     build_or_load_annotation_support(**kwargs)
     second_manifest = json.loads(cache_manifest.read_text())
     assert second_manifest["fingerprint"] != first_manifest["fingerprint"]
     assert second_manifest["inputs"] != first_manifest["inputs"]
 
 
-@pytest.mark.skipif(not BEDTOOLS_AVAILABLE, reason="bedtools is not installed")
 def test_annotation_support_resumes_completed_partitions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -684,9 +567,7 @@ def test_annotation_support_resumes_completed_partitions(
         "partition_dirs": [first_partition, second_partition],
         "map_root": contract["map_root"],
         "taxonomy": contract["taxonomy"],
-        "target_features": contract["target_features"],
         "variant_annotations_source": variant_manifest,
-        "failures": contract["failures"],
         "alignment_manifest": contract["alignment_manifest"],
         "annotation_manifest": contract["annotation_manifest"],
         "analytics_dir": analytics_dir,
@@ -760,9 +641,6 @@ def test_annotation_support_resumes_completed_partitions(
     parallel_outputs = build_or_load_annotation_support(**parallel_kwargs)
     assert _read_text(parallel_outputs.variant_strategy_support_tsv) == _read_text(
         outputs.variant_strategy_support_tsv
-    )
-    assert _read_text(parallel_outputs.ortholog_evidence_summary_tsv) == _read_text(
-        outputs.ortholog_evidence_summary_tsv
     )
 
 

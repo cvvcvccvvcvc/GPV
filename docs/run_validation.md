@@ -234,7 +234,7 @@ Analytics expected properties after the first report/preflight build:
   `fetch/orthologs.selected.tsv.gz`.
 - `<analytics-root>/cache/<source-id>/calculations/<calculation-id>/annotation_support/`
   contains
-  variant-strategy support and ortholog-evidence histograms derived from Stage 2
+  variant-strategy support and human-lineage membership derived from Stage 2
   evidence and the Stage 3 event map.
 - `<analytics-root>/analyses/<analysis-id>/` contains only run-set derivations,
   report HTML, performance data, and its analysis manifest.

@@ -32,7 +32,6 @@ from analytics.derivations.support import (  # noqa: E402
     StrategySupport,
     aggregate_exact_support,
     build_variant_strategy_support,
-    load_snv_alt_family_support,
 )
 from analytics.io.artifacts import content_identity  # noqa: E402
 from genomics.variants import event_vcf_key, variant_aggregate_key  # noqa: E402
@@ -567,8 +566,11 @@ def test_partition_timings_are_preserved_and_summed(tmp_path: Path) -> None:
 
 
 def test_analytics_support_schema_is_not_part_of_stage3_manifest() -> None:
-    assert VARIANT_STRATEGY_SUPPORT_FIELDS[-1] == "site_aligned_ortholog_count"
-    assert "alt_support_family_count" in VARIANT_STRATEGY_SUPPORT_FIELDS
+    assert VARIANT_STRATEGY_SUPPORT_FIELDS[-1] == "human_lineage_depth"
+    assert set(VARIANT_STRATEGY_SUPPORT_FIELDS) == {
+        "variant_key", "gene_id", "strategy", "alt_support_row_count",
+        "alt_support_ortholog_count", "human_lineage_depth",
+    }
     assert "variant_strategy_site_depth_count" not in COUNT_FIELDS
 
 
@@ -641,6 +643,7 @@ def test_exact_support_spool_counts_distinct_orthologs(tmp_path: Path) -> None:
     aggregate = {
         "variant_key": "1:100:A>G",
         "gene_id": "1",
+        "_taxonomy_depth_by_strategy": {"s1": 0, "s2": 0},
         "_support_by_strategy": {},
     }
     aggregates_by_id = [None, aggregate]
@@ -678,8 +681,7 @@ def test_exact_support_spool_counts_distinct_orthologs(tmp_path: Path) -> None:
             "strategy": "s1",
             "alt_support_row_count": 3,
             "alt_support_ortholog_count": 2,
-            "alt_support_family_count": "",
-            "site_aligned_ortholog_count": "",
+            "human_lineage_depth": 0,
         },
         {
             "variant_key": "1:100:A>G",
@@ -687,59 +689,9 @@ def test_exact_support_spool_counts_distinct_orthologs(tmp_path: Path) -> None:
             "strategy": "s2",
             "alt_support_row_count": 1,
             "alt_support_ortholog_count": 1,
-            "alt_support_family_count": "",
-            "site_aligned_ortholog_count": "",
+            "human_lineage_depth": 0,
         },
     ]
-
-
-def test_variant_strategy_support_loads_exact_alt_family_count(tmp_path: Path) -> None:
-    path = tmp_path / "snv_alt_taxonomic_support.tsv.gz"
-    with gzip.open(path, "wt", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "gene_id",
-                "strategy",
-                "target_start0",
-                "ref",
-                "alt",
-                "known_family_count",
-            ],
-            delimiter="\t",
-            lineterminator="\n",
-        )
-        writer.writeheader()
-        writer.writerow(
-            {
-                "gene_id": "1",
-                "strategy": "s1",
-                "target_start0": 4,
-                "ref": "a",
-                "alt": "g",
-                "known_family_count": 2,
-            }
-        )
-    aggregate = {
-        "variant_key": "1:100:A>G",
-        "gene_id": "1",
-        "event_type": "snv",
-        "target_start0": 4,
-        "ref": "A",
-        "alt": "G",
-        "_support_by_strategy": {
-            "s1": StrategySupport(row_count=3, ortholog_count=3)
-        },
-    }
-
-    family_supports = load_snv_alt_family_support(path)
-    rows, _missing = build_variant_strategy_support(
-        [aggregate],
-        {("1", "s1", 4): 3},
-        family_supports,
-    )
-
-    assert rows[0]["alt_support_family_count"] == 2
 
 
 def test_event_ortholog_support_stream_reads_consecutive_compact_groups(
@@ -812,44 +764,11 @@ def test_event_ortholog_support_stream_rejects_unmatched_group(tmp_path: Path) -
             stream.finish()
 
 
-def test_snv_support_uses_site_aligned_depth() -> None:
-    aggregate = {
-        "variant_key": "1:100:A>G",
-        "gene_id": "1",
-        "event_type": "snv",
-        "target_start0": "9",
-        "_support_by_strategy": {
-            "s1": StrategySupport(row_count=1, ortholog_count=1)
-        },
-    }
-    rows, _missing_key_count = build_variant_strategy_support(
-        [aggregate],
-        {("1", "s1", 9): 4},
-    )
-    assert rows[0]["site_aligned_ortholog_count"] == 4
-
-
-def test_snv_support_rejects_alt_count_above_site_depth() -> None:
-    aggregate = {
-        "variant_key": "1:100:A>G",
-        "gene_id": "1",
-        "event_type": "snv",
-        "_support_by_strategy": {
-            "s1": StrategySupport(row_count=2, ortholog_count=2)
-        },
-    }
-
-    with pytest.raises(ValueError, match="exceeds site-aligned"):
-        build_variant_strategy_support(
-            [aggregate],
-            {("1", "s1", 0): 1},
-        )
-
-
 def test_variant_strategy_support_uses_exact_edge_multiplicity() -> None:
     aggregate = {
         "variant_key": "1:100:A>G",
         "gene_id": "1",
+        "_taxonomy_depth_by_strategy": {"s1": 0, "s2": 0},
         "_support_by_strategy": {
             "s1": StrategySupport(row_count=10, ortholog_count=3)
         },

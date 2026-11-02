@@ -251,8 +251,6 @@ def _support_rows(support: pd.DataFrame, variants: pd.DataFrame) -> pd.DataFrame
         "gene_id",
         "strategy",
         "alt_support_ortholog_count",
-        "alt_support_family_count",
-        "site_aligned_ortholog_count",
     ]
     rows = support[
         support["variant_key"].isin(variants.loc[variants["event_type"].eq("snv"), "variant_key"])
@@ -264,13 +262,10 @@ def _support_rows(support: pd.DataFrame, variants: pd.DataFrame) -> pd.DataFrame
     invalid = (
         rows[columns[3:]].isna().any(axis=1)
         | rows["alt_support_ortholog_count"].lt(1)
-        | rows["alt_support_family_count"].lt(0)
-        | rows["alt_support_family_count"].gt(rows["alt_support_ortholog_count"])
-        | rows["alt_support_ortholog_count"].gt(rows["site_aligned_ortholog_count"])
     )
     if invalid.any():
         raise ValueError("Invalid exact support counts for P/LP SNVs")
-    # Select a complete row, preserving its gene/depth/family context on ties.
+    # Select a complete row, preserving its gene context on ties.
     return (
         rows[columns]
         .sort_values(

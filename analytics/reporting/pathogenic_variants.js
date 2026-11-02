@@ -110,8 +110,8 @@ document.addEventListener('DOMContentLoaded', () => {
       return [{
         type: violin ? 'violin' : 'box', name: names.get(group) + '<br>n=' + counts.length.toLocaleString(),
         y: counts.map(Math.log10), marker: {color: '#356d8f'}, line: {color: '#356d8f'},
-        customdata: rows.map(r => [r.variant_key, r.gene_id, r.alt_support_ortholog_count, r.site_aligned_ortholog_count, r.alt_support_family_count]),
-        hovertemplate: '%{customdata[0]}<br>Gene: %{customdata[1]}<br>Supporting orthologs: %{customdata[2]}<br>Site-aligned orthologs: %{customdata[3]}<br>Supporting families: %{customdata[4]}<extra>%{fullData.name}</extra>',
+        customdata: rows.map(r => [r.variant_key, r.gene_id, r.alt_support_ortholog_count]),
+        hovertemplate: '%{customdata[0]}<br>Gene: %{customdata[1]}<br>Supporting orthologs: %{customdata[2]}<extra>%{fullData.name}</extra>',
         ...(violin ? {points, box: {visible: true}, meanline: {visible: true}, spanmode: 'hard'} : {boxpoints: points}),
       }];
     });

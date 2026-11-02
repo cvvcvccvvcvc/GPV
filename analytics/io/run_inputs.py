@@ -96,7 +96,6 @@ class AnalysisInputs:
     target_sequence_dirs: tuple[Path, ...]
     variant_annotation_sources: tuple[Path, ...]
     variant_strategy_support_tsvs: tuple[Path, ...]
-    ortholog_evidence_summary_tsvs: tuple[Path, ...]
     annotation_failure_tsvs: tuple[Path, ...]
     feature_coverage_tsvs: tuple[Path, ...]
     strategy_summary_tsvs: tuple[Path, ...]
@@ -256,7 +255,6 @@ def build_analysis_inputs(
             ))
             annotation_paths.append(AnnotationSupportPaths(
                 source_cache / "annotation_support" / "variant_strategy_support.tsv.gz",
-                source_cache / "annotation_support" / "ortholog_evidence_summary.tsv.gz",
             ))
             taxonomy_paths.append(source_cache / "taxonomy_summary" / "taxonomy_summary.tsv.gz")
             continue
@@ -321,9 +319,6 @@ def build_analysis_inputs(
         ),
         variant_strategy_support_tsvs=tuple(
             value.variant_strategy_support_tsv for value in annotation_paths
-        ),
-        ortholog_evidence_summary_tsvs=tuple(
-            value.ortholog_evidence_summary_tsv for value in annotation_paths
         ),
         annotation_failure_tsvs=tuple(
             source.annotation_failures_tsv for source in source_runs
@@ -469,21 +464,7 @@ def validate_report_inputs(inputs: AnalysisInputs) -> None:
                 "strategy",
                 "alt_support_row_count",
                 "alt_support_ortholog_count",
-                "alt_support_family_count",
-            },
-        ),
-        (
-            inputs.ortholog_evidence_summary_tsvs,
-            {
-                "strategy",
-                "target_context",
-                "taxonomic_scope",
-                "evidence_unit",
-                "site_aligned_count",
-                "alt_support_count",
-                "gnomad_found_count",
-                "gnomad_not_found_count",
-                "gnomad_lookup_failed_count",
+                "human_lineage_depth",
             },
         ),
     ]

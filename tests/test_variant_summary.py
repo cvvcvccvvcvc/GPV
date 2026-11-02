@@ -11,217 +11,12 @@ from analytics.vep.consequences import UNANNOTATED_CONSEQUENCE
 from analytics.analyses.variant_summary import (
     VARIANT_USECOLS,
     build_variant_summary,
-    read_taxonomic_ortholog_evidence,
 )
 from analytics.io.performance import PerformanceProfile
 
 
-ORTHOLOG_EVIDENCE_FIELDS = [
-    "strategy",
-    "target_context",
-    "taxonomic_scope",
-    "evidence_unit",
-    "site_aligned_count",
-    "alt_support_count",
-    "gnomad_found_count",
-    "gnomad_not_found_count",
-    "gnomad_lookup_failed_count",
-]
-
-
-def _write_empty_ortholog_evidence(tmp_path: Path) -> Path:
-    path = tmp_path / "ortholog_evidence_summary.tsv.gz"
-    pd.DataFrame(columns=ORTHOLOG_EVIDENCE_FIELDS).to_csv(
-        path,
-        sep="\t",
-        index=False,
-        compression="gzip",
-    )
-    return path
-
-
-def test_variant_summary_requires_ortholog_evidence(tmp_path: Path) -> None:
-    annotations = tmp_path / "variant_annotations.tsv.gz"
-    pd.DataFrame(columns=VARIANT_USECOLS).to_csv(
-        annotations,
-        sep="\t",
-        index=False,
-        compression="gzip",
-    )
-
-    with pytest.raises(FileNotFoundError):
-        build_variant_summary(
-            annotations,
-            tmp_path / "analytics",
-            strategy_label=str,
-            ortholog_evidence_summary_path=tmp_path / "missing.tsv.gz",
-        )
-
-
-def test_taxonomic_ortholog_evidence_uses_absolute_alt_support(tmp_path: Path) -> None:
-    path = tmp_path / "ortholog_evidence_summary.tsv.gz"
-    fields = [
-        "strategy",
-        "target_context",
-        "taxonomic_scope",
-        "evidence_unit",
-        "site_aligned_count",
-        "alt_support_count",
-        "gnomad_found_count",
-        "gnomad_not_found_count",
-        "gnomad_lookup_failed_count",
-    ]
-    with gzip.open(path, "wt", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(
-            [
-                {
-                    "strategy": "s1",
-                    "target_context": "cds",
-                    "taxonomic_scope": "mammalia",
-                    "evidence_unit": "species",
-                    "site_aligned_count": depth,
-                    "alt_support_count": alt,
-                    "gnomad_found_count": found,
-                    "gnomad_not_found_count": 1,
-                    "gnomad_lookup_failed_count": 3,
-                }
-                for depth, alt, found in [(10, 1, 1), (10, 5, 2), (20, 10, 3)]
-            ]
-        )
-
-    cells, distributions = read_taxonomic_ortholog_evidence(path)
-
-    assert set(cells["taxonomic_scope"]) == {"mammalia"}
-    assert set(cells["evidence_unit"]) == {"species"}
-    assert cells["alt_label"].str.contains("%").sum() == 0
-    assert int(cells[cells["quantile_count"].eq(2)]["gnomad_eligible_count"].sum()) == 9
-    site = distributions[distributions["metric"].eq("site_aligned")].set_index("value")
-    alt = distributions[distributions["metric"].eq("exact_alt")].set_index("value")
-    assert int(site.loc[10, "variant_count"]) == 11
-    assert int(site.loc[20, "variant_count"]) == 7
-    assert int(alt.loc[1, "variant_count"]) == 5
-    assert int(distributions[distributions["metric"].eq("exact_alt")]["variant_count"].sum()) == 18
-
-
-def test_variant_summary_prefers_compact_ortholog_evidence_and_tracks_its_cache(
-    tmp_path: Path,
-) -> None:
-    annotations = tmp_path / "variant_annotations.tsv.gz"
-    support = tmp_path / "variant_strategy_support.tsv.gz"
-    compact = tmp_path / "ortholog_evidence_summary.tsv.gz"
-    pd.DataFrame(
-        [
-            {
-                "variant_key": "1:100:A>G",
-                "gene_id": "1",
-                "event_type": "snv",
-                "ref": "A",
-                "alt": "G",
-                "lookup_status": "ok",
-                "strategies": "s1",
-            }
-        ],
-        columns=VARIANT_USECOLS,
-    ).fillna("").to_csv(annotations, sep="\t", index=False, compression="gzip")
-    pd.DataFrame(
-        [
-            {
-                "variant_key": "1:100:A>G",
-                "gene_id": "1",
-                "strategy": "s1",
-                "alt_support_row_count": 11,
-                "alt_support_ortholog_count": 11,
-                "site_aligned_ortholog_count": 10,
-            }
-        ]
-    ).to_csv(support, sep="\t", index=False, compression="gzip")
-
-    def write_compact(found: int) -> None:
-        pd.DataFrame(
-            [
-                {
-                    "strategy": "s1",
-                    "target_context": "cds",
-                    "taxonomic_scope": "mammalia",
-                    "evidence_unit": "species",
-                    "site_aligned_count": 10,
-                    "alt_support_count": 5,
-                    "gnomad_found_count": found,
-                    "gnomad_not_found_count": 1,
-                    "gnomad_lookup_failed_count": 0,
-                }
-            ]
-        ).to_csv(compact, sep="\t", index=False, compression="gzip")
-
-    write_compact(2)
-    work_dir = tmp_path / "analytics"
-    profile = PerformanceProfile(
-        tmp_path / "performance.json",
-        analysis_dir=tmp_path,
-        analysis_id="test-analysis",
-        report_path=tmp_path / "report.html",
-    )
-    with profile.stage("Variant summary"):
-        summary = build_variant_summary(
-            annotations,
-            work_dir,
-            strategy_label=str,
-            variant_strategy_support_path=support,
-            ortholog_evidence_summary_path=compact,
-            performance_profile=profile,
-        )
-    profile.finish()
-
-    aggregation = next(
-        stage
-        for stage in profile.stages
-        if stage["name"] == "Variant summary aggregation"
-    )
-    assert aggregation["parent_id"] == profile.stages[0]["id"]
-    assert aggregation["metrics"]["duckdb_source_scan_seconds"] >= 0
-    assert aggregation["metrics"]["duckdb_compacted_relations_seconds"] >= 0
-    assert aggregation["metrics"]["duckdb_allele_gene_row_count"] == 1
-    assert aggregation["metrics"]["duckdb_global_allele_row_count"] == 1
-    assert aggregation["metrics"]["duckdb_memory_limit"]
-    assert aggregation["metrics"]["summary_assembly_seconds"] >= 0
-    assert "temporary_sqlite_bytes" not in aggregation["metrics"]
-    assert set(summary.ortholog_evidence_cells["taxonomic_scope"]) == {"mammalia"}
-    assert int(
-        summary.ortholog_evidence_cells[
-            summary.ortholog_evidence_cells["quantile_count"].eq(2)
-        ]["gnomad_found_count"].sum()
-    ) == 2
-
-    cached = build_variant_summary(
-        annotations,
-        work_dir,
-        strategy_label=str,
-        variant_strategy_support_path=support,
-        ortholog_evidence_summary_path=compact,
-    )
-    assert cached.cache_hit
-
-    write_compact(3)
-    rebuilt = build_variant_summary(
-        annotations,
-        work_dir,
-        strategy_label=str,
-        variant_strategy_support_path=support,
-        ortholog_evidence_summary_path=compact,
-    )
-    assert not rebuilt.cache_hit
-    assert int(
-        rebuilt.ortholog_evidence_cells[
-            rebuilt.ortholog_evidence_cells["quantile_count"].eq(2)
-        ]["gnomad_found_count"].sum()
-    ) == 3
-
-
 def test_variant_summary_accepts_compact_annotation_schema(tmp_path: Path) -> None:
     annotations = tmp_path / "variant_annotations.tsv.gz"
-    ortholog_evidence = _write_empty_ortholog_evidence(tmp_path)
     rows = [
         {
             "variant_key": "1:100:A>G",
@@ -287,7 +82,6 @@ def test_variant_summary_accepts_compact_annotation_schema(tmp_path: Path) -> No
         annotations,
         tmp_path / "analytics",
         strategy_label=lambda value: value,
-        ortholog_evidence_summary_path=ortholog_evidence,
     )
 
     assert summary.input_row_count == 3
@@ -310,7 +104,6 @@ def test_variant_summary_accepts_compact_annotation_schema(tmp_path: Path) -> No
         annotations,
         tmp_path / "analytics",
         strategy_label=lambda value: value,
-        ortholog_evidence_summary_path=ortholog_evidence,
     )
     assert cached.cache_hit
     assert cached.all_strategy_variant_count == 1
@@ -321,7 +114,6 @@ def test_variant_summary_accepts_compact_annotation_schema(tmp_path: Path) -> No
 
 def test_variant_summary_uses_vep_consequences_for_all_candidates(tmp_path: Path) -> None:
     annotations = tmp_path / "variant_annotations.tsv.gz"
-    ortholog_evidence = _write_empty_ortholog_evidence(tmp_path)
     fields = VARIANT_USECOLS
     rows = [
         {
@@ -356,7 +148,6 @@ def test_variant_summary_uses_vep_consequences_for_all_candidates(tmp_path: Path
         annotations,
         tmp_path / "analytics",
         strategy_label=str,
-        ortholog_evidence_summary_path=ortholog_evidence,
     )
 
     assert summary.consequence_source == "Ensembl VEP"
@@ -382,7 +173,6 @@ def test_variant_summary_uses_vep_consequences_for_all_candidates(tmp_path: Path
 
 def test_variant_summary_rebuilds_a_corrupt_cache(tmp_path: Path) -> None:
     annotations = tmp_path / "variant_annotations.tsv.gz"
-    ortholog_evidence = _write_empty_ortholog_evidence(tmp_path)
     with gzip.open(annotations, "wt", newline="") as handle:
         writer = csv.DictWriter(
             handle,
@@ -410,7 +200,6 @@ def test_variant_summary_rebuilds_a_corrupt_cache(tmp_path: Path) -> None:
         annotations,
         work_dir,
         strategy_label=str,
-        ortholog_evidence_summary_path=ortholog_evidence,
     )
     assert not first.cache_hit
     (work_dir / "variant_summary.json.gz").write_bytes(b"not a gzip stream")
@@ -419,7 +208,6 @@ def test_variant_summary_rebuilds_a_corrupt_cache(tmp_path: Path) -> None:
         annotations,
         work_dir,
         strategy_label=str,
-        ortholog_evidence_summary_path=ortholog_evidence,
     )
     assert not rebuilt.cache_hit
     assert rebuilt.unique_variant_count == 1
@@ -428,7 +216,6 @@ def test_variant_summary_rebuilds_a_corrupt_cache(tmp_path: Path) -> None:
 def test_variant_summary_adds_per_strategy_pathogenic_support(tmp_path: Path) -> None:
     annotations = tmp_path / "variant_annotations.tsv.gz"
     support = tmp_path / "variant_strategy_support.tsv.gz"
-    ortholog_evidence = _write_empty_ortholog_evidence(tmp_path)
     with gzip.open(annotations, "wt", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=VARIANT_USECOLS, delimiter="\t", lineterminator="\n")
         writer.writeheader()
@@ -459,18 +246,15 @@ def test_variant_summary_adds_per_strategy_pathogenic_support(tmp_path: Path) ->
                 "strategy",
                 "alt_support_row_count",
                 "alt_support_ortholog_count",
-                "alt_support_family_count",
-                "site_aligned_ortholog_count",
             ]
         )
-        writer.writerows(pd_rows)
+        writer.writerows([row[:5] for row in pd_rows])
 
     summary = build_variant_summary(
         annotations,
         tmp_path / "analytics",
         strategy_label=str,
         variant_strategy_support_path=support,
-        ortholog_evidence_summary_path=ortholog_evidence,
     )
 
     row = summary.pathogenic_rows.iloc[0]
@@ -478,15 +262,10 @@ def test_variant_summary_adds_per_strategy_pathogenic_support(tmp_path: Path) ->
     assert row["support_ortholog_mean"] == 5.0
     assert row["support_ortholog_min"] == 3
     assert row["support_ortholog_max"] == 7
-    assert summary.pathogenic_support_rows["alt_support_family_count"].tolist() == [2, 4]
-    assert summary.pathogenic_support_rows[
-        "site_aligned_ortholog_count"
-    ].tolist() == [10, 12]
 
 
 def test_variant_summary_retains_all_pathogenic_detail_rows(tmp_path: Path) -> None:
     annotations = tmp_path / "variant_annotations.tsv.gz"
-    ortholog_evidence = _write_empty_ortholog_evidence(tmp_path)
     with gzip.open(annotations, "wt", newline="") as handle:
         writer = csv.DictWriter(
             handle,
@@ -516,7 +295,6 @@ def test_variant_summary_retains_all_pathogenic_detail_rows(tmp_path: Path) -> N
         annotations,
         tmp_path / "analytics",
         strategy_label=str,
-        ortholog_evidence_summary_path=ortholog_evidence,
     )
 
     assert summary.pathogenic_variant_count == 105
@@ -527,7 +305,6 @@ def test_variant_summary_aggregates_target_context_and_gnomad_strata(tmp_path: P
     annotations = tmp_path / "variant_annotations.tsv.gz"
     features = tmp_path / "target_features.tsv.gz"
     genes = tmp_path / "genes.tsv.gz"
-    ortholog_evidence = _write_empty_ortholog_evidence(tmp_path)
     rows = [
         {"variant_key": "1:1:A>G", "gene_id": "1", "event_type": "snv", "ref": "A", "alt": "G", "lookup_status": "ok", "strategies": "s1", "gnomad_af": "0.01"},
         {"variant_key": "1:7:C>T", "gene_id": "1", "event_type": "snv", "ref": "C", "alt": "T", "lookup_status": "ok", "strategies": "s1", "gnomad_af": ""},
@@ -557,7 +334,6 @@ def test_variant_summary_aggregates_target_context_and_gnomad_strata(tmp_path: P
         annotations,
         tmp_path / "analytics",
         strategy_label=str,
-        ortholog_evidence_summary_path=ortholog_evidence,
         target_features_path=features,
         genes_path=genes,
     )
@@ -572,7 +348,6 @@ def test_variant_summary_aggregates_target_context_and_gnomad_strata(tmp_path: P
 def test_variant_summary_excludes_failed_gnomad_lookups_from_denominator(tmp_path: Path) -> None:
     annotations = tmp_path / "variant_annotations.tsv.gz"
     failures = tmp_path / "failures.tsv.gz"
-    ortholog_evidence = _write_empty_ortholog_evidence(tmp_path)
     rows = [
         {"variant_key": "1:100:A>G", "gene_id": "1", "event_type": "snv", "ref": "A", "alt": "G", "lookup_status": "ok", "strategies": "s1", "gnomad_af": "0.01"},
         {"variant_key": "1:200:C>T", "gene_id": "1", "event_type": "snv", "ref": "C", "alt": "T", "lookup_status": "ok", "strategies": "s1", "gnomad_af": ""},
@@ -596,7 +371,6 @@ def test_variant_summary_excludes_failed_gnomad_lookups_from_denominator(tmp_pat
         annotations,
         tmp_path / "analytics",
         strategy_label=str,
-        ortholog_evidence_summary_path=ortholog_evidence,
         annotation_failures_path=failures,
     )
 

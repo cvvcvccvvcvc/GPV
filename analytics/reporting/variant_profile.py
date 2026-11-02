@@ -750,3 +750,65 @@ def build_gnomad_stratification_sections(
     else:
         sections.append("<p>No VEP consequence counts were available for completed gnomAD lookups.</p>")
     return sections
+
+
+def build_lineage_profile_sections(analysis, ortholog_counts: pd.DataFrame) -> list[str]:
+    """Reuse exact filtering counts; the ortholog pool is strategy-independent."""
+    import json
+    from analytics.analyses.basic_filtering import UNION_LABEL, UNION_STRATEGY
+    from analytics.derivations.taxonomy import HUMAN_LINEAGE
+    from .components import dataframe_records
+
+    curves = analysis.candidate_curves
+    rows = curves[curves.filter_key.eq("taxonomy") & curves.target_context.eq("all")
+                  & curves.consequence.eq("all")]
+    strategies = rows.strategy.drop_duplicates().tolist()
+    config = json.dumps({
+        "lineage": [name for _tax_id, name in HUMAN_LINEAGE],
+        "strategies": [{"key": strategy, "label": UNION_LABEL if strategy == UNION_STRATEGY
+                         else strategy_label(strategy)} for strategy in strategies],
+        "rows": dataframe_records(rows[["strategy", "variant_type", "threshold", "retained_variant_count"]]),
+    }, allow_nan=False, separators=(",", ":")).replace("</", "<\\/")
+    orthologs = go.Figure(go.Scatter(
+        x=ortholog_counts.taxon, y=ortholog_counts.ortholog_count, mode="lines+markers",
+        customdata=ortholog_counts[["tax_id"]], name="Selected orthologs",
+        hovertemplate="%{x} (tax ID %{customdata[0]})<br>Unique ortholog genes: %{y:,}<extra></extra>",
+    ))
+    orthologs.update_layout(title="Selected ortholog genes along the human lineage", template="plotly_white",
+        height=510, margin=dict(l=80, r=25, t=55, b=175),
+        xaxis=dict(type="category", categoryorder="array", categoryarray=[name for _, name in HUMAN_LINEAGE],
+                   tickangle=-55, title="Human lineage: broad → narrow"),
+        yaxis=dict(title="Unique ortholog gene IDs", rangemode="tozero"))
+    return ["<h2>Human-lineage taxonomy</h2>",
+        "<p>Variants retain exact ALT support from at least one ortholog in the selected clade. "
+        "The ortholog pool counts unique selected NCBI Gene IDs across all target genes, before alignment; "
+        "it is independent of strategy. Unresolved taxonomy remains only in All selected.</p>",
+        '<div class="analysis-controls" id="lineage-controls"><label>Strategies<select data-role="strategy"></select></label>'
+        '<label>Variant type<select data-role="type"><option value="all">All variants</option>'
+        '<option value="snv">SNVs</option><option value="indel">Indels</option></select></label></div>'
+        '<div id="lineage-variants" class="analysis-plot"></div>',
+        "<script>(() => { const config = " + config + ";" + r'''
+        const controls = document.getElementById('lineage-controls');
+        const strategy = controls.querySelector('[data-role="strategy"]');
+        const type = controls.querySelector('[data-role="type"]');
+        strategy.add(new Option('Compare all strategies', 'compare'));
+        config.strategies.forEach(item => strategy.add(new Option(item.label, item.key)));
+        strategy.value = config.strategies.some(item => item.key === 'union') ? 'union' : 'compare';
+        function render() {
+            const selected = config.strategies.filter(item => strategy.value === 'compare' ? item.key !== 'union' : item.key === strategy.value);
+            const traces = selected.map(item => {
+                const counts = config.lineage.map(() => 0);
+                config.rows.filter(row => row.strategy === item.key && (type.value === 'all' || row.variant_type === type.value))
+                    .forEach(row => counts[row.threshold] += row.retained_variant_count);
+                return {type: 'scatter', mode: 'lines+markers', name: item.label, x: config.lineage, y: counts,
+                    hovertemplate: '%{x}<br>Unique alleles: %{y:,}<extra>%{fullData.name}</extra>'};
+            });
+            Plotly.react('lineage-variants', traces, {title: {text: 'Candidate alleles along the human lineage'},
+                template: 'plotly_white', height: 540, margin: {l: 80, r: 25, t: 55, b: 175},
+                xaxis: {type: 'category', categoryorder: 'array', categoryarray: config.lineage, tickangle: -55,
+                    title: {text: 'Human lineage: broad → narrow'}},
+                yaxis: {title: {text: 'Unique alleles'}, rangemode: 'tozero'},
+                legend: {orientation: 'h', y: -0.6}}, {responsive: true});
+        }
+        strategy.addEventListener('change', render); type.addEventListener('change', render); render();
+        })();</script>''', fig_html(orthologs)]

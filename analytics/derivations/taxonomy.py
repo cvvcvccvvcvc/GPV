@@ -7,10 +7,31 @@ import gzip
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from genomics.taxonomy import TAXONOMY_FIELDS
 
+
+# NCBI taxon 9606 parents, from Eukaryota to Homo (2026-11-02).
+# https://api.ncbi.nlm.nih.gov/datasets/v2/taxonomy/taxon/9606/dataset_report
+# The target is fixed; memberships always use the archived Stage 1 lineage.
+HUMAN_LINEAGE = (
+    ("", "All selected"),
+    ("2759", "Eukaryota"), ("33154", "Opisthokonta"),
+    ("33208", "Metazoa"), ("6072", "Eumetazoa"),
+    ("33213", "Bilateria"), ("33511", "Deuterostomia"),
+    ("7711", "Chordata"), ("89593", "Craniata"),
+    ("7742", "Vertebrata"), ("7776", "Gnathostomata"),
+    ("117570", "Teleostomi"), ("117571", "Euteleostomi"),
+    ("8287", "Sarcopterygii"), ("1338369", "Dipnotetrapodomorpha"),
+    ("32523", "Tetrapoda"), ("32524", "Amniota"),
+    ("40674", "Mammalia"), ("32525", "Theria"),
+    ("9347", "Eutheria"), ("1437010", "Boreoeutheria"),
+    ("314146", "Euarchontoglires"), ("9443", "Primates"),
+    ("376913", "Haplorrhini"), ("314293", "Simiiformes"),
+    ("9526", "Catarrhini"), ("314295", "Hominoidea"),
+    ("9604", "Hominidae"), ("207598", "Homininae"), ("9605", "Homo"),
+)
 
 SCOPE_ANCESTORS = {
     "all": "",
@@ -58,8 +79,13 @@ class TaxonomyProfile:
     order_id: str
     scope_mask: int = field(init=False, repr=False)
     rank_unit_ids: tuple[object, ...] = field(init=False, repr=False)
+    human_lineage_depth: int = field(init=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "human_lineage_depth", max(
+            (index for index, (tax_id, _name) in enumerate(HUMAN_LINEAGE)
+             if tax_id in self.ancestor_ids), default=0,
+        ))
         scope_mask = 1
         for scope_index, ancestor_id in enumerate(
             _SCOPE_ANCESTOR_IDS[1:],
@@ -136,6 +162,34 @@ def load_taxonomy_profiles(path: Path) -> dict[str, TaxonomyProfile]:
                 order_id=str(row.get("order_id") or ""),
             )
     return profiles
+
+
+def lineage_ortholog_counts(
+    taxonomy_paths: Sequence[Path], ortholog_paths: Sequence[Path],
+) -> list[dict[str, object]]:
+    """Count unique selected NCBI ortholog Gene IDs, never target/strategy rows."""
+    if not taxonomy_paths or len(taxonomy_paths) != len(ortholog_paths):
+        raise ValueError("Lineage counts require paired taxonomy and selected-ortholog inputs")
+    profiles: dict[str, TaxonomyProfile] = {}
+    for path in taxonomy_paths:
+        for tax_id, profile in load_taxonomy_profiles(path).items():
+            if profiles.setdefault(tax_id, profile) != profile:
+                raise ValueError(f"Source taxonomy tables disagree for tax_id {tax_id}: {path}")
+    orthologs: dict[str, str] = {}
+    for path in ortholog_paths:
+        with gzip.open(path, "rt", newline="") as handle:
+            for row in csv.DictReader(handle, delimiter="\t"):
+                gene, tax_id = row["ortholog_gene_id"], row["tax_id"]
+                if not gene or tax_id not in profiles:
+                    raise ValueError(f"Invalid selected ortholog or missing taxonomy: {gene!r}, {tax_id!r}")
+                if orthologs.setdefault(gene, tax_id) != tax_id:
+                    raise ValueError(f"Selected ortholog {gene} has conflicting tax IDs")
+    depths = [0] * len(HUMAN_LINEAGE)
+    for tax_id in orthologs.values():
+        depths[profiles[tax_id].human_lineage_depth] += 1
+    counts = [sum(depths[index:]) for index in range(len(depths))]
+    return [dict(threshold=index, tax_id=tax_id, taxon=name, ortholog_count=counts[index])
+            for index, (tax_id, name) in enumerate(HUMAN_LINEAGE)]
 
 
 def member_group_keys(

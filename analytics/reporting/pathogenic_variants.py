@@ -197,16 +197,13 @@ def pathogenic_support_figure(rows: pd.DataFrame):
                     "variant_key",
                     "gene_id",
                     "alt_support_ortholog_count",
-                    "site_aligned_ortholog_count",
-                    "alt_support_family_count",
                 ]
             ],
             marker_color="#356d8f",
             line_color="#356d8f",
             hovertemplate=(
                 "%{customdata[0]}<br>Gene: %{customdata[1]}<br>Supporting orthologs: "
-                "%{customdata[2]}<br>Site-aligned orthologs: %{customdata[3]}<br>"
-                "Supporting families: %{customdata[4]}<extra>%{fullData.name}</extra>"
+                "%{customdata[2]}<extra>%{fullData.name}</extra>"
             ),
         )
         if len(set(counts)) >= 3:

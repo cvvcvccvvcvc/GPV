@@ -19,31 +19,14 @@ from pathlib import Path
 import duckdb
 
 from analytics.derivations.alignment_summary import concatenate_tsv_gz
-from analytics.derivations.feature_coverage import (
-    load_snv_site_depth,
-    prepare_snv_sites,
-    snv_event_site,
-    write_snv_site_depth,
-    write_snv_taxonomic_depth,
-)
-from analytics.derivations.ortholog_evidence import (
-    ORTHOLOG_EVIDENCE_FIELDS,
-    write_ortholog_evidence_summary,
-)
 from analytics.derivations.support import (
-    ALT_SUPPORT_FAMILY_COLUMN,
     VARIANT_STRATEGY_SUPPORT_FIELDS,
     EventOrthologSupportStream,
     ExactSupportSpool,
     aggregate_exact_support,
-    build_gnomad_statuses,
     build_variant_strategy_support,
-    load_snv_alt_family_support,
-    merge_ortholog_evidence,
 )
 from analytics.derivations.taxonomy import (
-    COUNT_KEYS,
-    count_member_groups,
     load_taxonomy_profiles,
 )
 from analytics.io.artifacts import content_identity, file_identity, write_json_atomic
@@ -56,13 +39,11 @@ from analytics.io.variant_source import (
 from genomics.variants import parse_variant_key, variant_aggregate_key
 
 
-CACHE_SCHEMA_VERSION = 7
-PARTITION_CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 8
+PARTITION_CACHE_SCHEMA_VERSION = 3
 CACHE_DIRNAME = "annotation_support"
 VARIANT_SUPPORT_FILENAME = "variant_strategy_support.tsv.gz"
-ORTHOLOG_EVIDENCE_FILENAME = "ortholog_evidence_summary.tsv.gz"
 EVENTS_FILENAME = "alignment_events.tsv.gz"
-SEGMENTS_FILENAME = "alignment_segments.tsv.gz"
 EVENT_SUPPORT_FILENAME = "event_ortholog_support.tsv.gz"
 EVENT_MAP_FILENAME = "event_variant_map.tsv.gz"
 EVENT_VARIANT_MAP_FIELDS = [
@@ -84,22 +65,9 @@ COMPACT_EVENT_FIELDS = [
     "strategy",
     "qc_flags",
 ]
-DNA_BASES = frozenset("ACGT")
-SNV_ALT_TAXONOMIC_SUPPORT_FIELDS = [
-    "gene_id",
-    "strategy",
-    "target_start0",
-    "ref",
-    "alt",
-    *COUNT_KEYS,
-    ALT_SUPPORT_FAMILY_COLUMN,
-]
-
-
 @dataclass(frozen=True)
 class AnnotationSupportPaths:
     variant_strategy_support_tsv: Path
-    ortholog_evidence_summary_tsv: Path
 
 
 @dataclass(frozen=True)
@@ -107,7 +75,6 @@ class PartitionSupportResult:
     partition_id: str
     directory: Path
     support_row_count: int
-    ortholog_row_count: int
     exact_support: dict[str, int]
     timings_seconds: dict[str, float]
     reused: bool
@@ -118,9 +85,9 @@ class PartitionBuildSpec:
     partition_dir: Path
     map_path: Path
     taxonomy: Path
-    target_features: Path
+
     variant_source: VariantTableSource
-    failures: Path
+
     work_dir: Path
 
 
@@ -170,17 +137,13 @@ def resolve_annotation_support_paths(
     map_root = annotation_dir / "event_variant_map" / "partitions"
     evidence_root = alignment_dir / "evidence" / "partitions"
     variant_annotations_source = variant_annotations_override or annotation_dir / "variant_annotations" / "manifest.json"
-    failures = annotation_dir / "failures.tsv.gz"
     taxonomy = run_dir / "fetch" / "taxonomy.tsv.gz"
-    target_features = run_dir / "fetch" / "target_features.tsv.gz"
     required_paths = (
         alignment_manifest_path,
         map_root,
         evidence_root,
         variant_annotations_source,
-        failures,
         taxonomy,
-        target_features,
     )
     missing = [str(path) for path in required_paths if not path.exists()]
     if missing:
@@ -233,9 +196,7 @@ def resolve_annotation_support_paths(
         partition_dirs=partition_dirs,
         map_root=map_root,
         taxonomy=taxonomy,
-        target_features=target_features,
         variant_annotations_source=variant_annotations_source,
-        failures=failures,
         alignment_manifest=alignment_manifest_path,
         annotation_manifest=annotation_manifest_path,
         analytics_dir=analytics_dir,
@@ -249,9 +210,7 @@ def build_or_load_annotation_support(
     partition_dirs: list[Path],
     map_root: Path,
     taxonomy: Path,
-    target_features: Path,
     variant_annotations_source: Path,
-    failures: Path,
     alignment_manifest: Path,
     annotation_manifest: Path,
     analytics_dir: Path,
@@ -271,9 +230,7 @@ def build_or_load_annotation_support(
     _validate_partition_inputs(partition_dirs, map_root)
     for path in (
         taxonomy,
-        target_features,
         variant_annotations_source,
-        failures,
         alignment_manifest,
         annotation_manifest,
     ):
@@ -283,22 +240,19 @@ def build_or_load_annotation_support(
     cache_dir = analytics_dir / CACHE_DIRNAME
     outputs = AnnotationSupportPaths(
         variant_strategy_support_tsv=cache_dir / VARIANT_SUPPORT_FILENAME,
-        ortholog_evidence_summary_tsv=cache_dir / ORTHOLOG_EVIDENCE_FILENAME,
     )
     manifest_path = cache_dir / "manifest.json"
     variant_source = resolve_variant_table_source(
         variant_annotations_source,
-        required_columns={"variant_key", "gene_id", "lookup_status", "gnomad_af"},
+        required_columns={"variant_key", "gene_id", "lookup_status"},
     )
     variant_sources = variant_sources_by_partition(variant_source, partition_ids)
     inputs = _input_identities(
         partition_dirs=partition_dirs,
         map_root=map_root,
         taxonomy=taxonomy,
-        target_features=target_features,
         variant_source=variant_source,
         variant_sources=variant_sources,
-        failures=failures,
         alignment_manifest=alignment_manifest,
         annotation_manifest=annotation_manifest,
     )
@@ -338,7 +292,6 @@ def build_or_load_annotation_support(
     ) as temporary_name:
         temporary_dir = Path(temporary_name)
         temporary_support = temporary_dir / VARIANT_SUPPORT_FILENAME
-        temporary_ortholog = temporary_dir / ORTHOLOG_EVIDENCE_FILENAME
         pending: list[PendingPartition] = []
         for partition_dir in partition_dirs:
             partition_inputs = _partition_checkpoint_inputs(
@@ -365,9 +318,7 @@ def build_or_load_annotation_support(
                             map_root / partition_dir.name / EVENT_MAP_FILENAME
                         ),
                         taxonomy=taxonomy,
-                        target_features=target_features,
                         variant_source=variant_sources[partition_dir.name],
-                        failures=failures,
                         work_dir=temporary_dir / partition_dir.name,
                     ),
                     checkpoint_dir=checkpoint_dir,
@@ -428,22 +379,8 @@ def build_or_load_annotation_support(
             temporary_support,
         )
         _record_timing(timings, "merge_variant_support", phase_started)
-        phase_started = time.perf_counter()
-        ortholog_row_count = merge_ortholog_evidence(
-            [
-                (
-                    result.directory,
-                    {"ortholog_evidence_summary_count": result.ortholog_row_count},
-                )
-                for result in partition_results
-            ],
-            temporary_ortholog,
-        )
-        _record_timing(timings, "merge_ortholog_evidence", phase_started)
         temporary_support.chmod(0o644)
-        temporary_ortholog.chmod(0o644)
         temporary_support.replace(outputs.variant_strategy_support_tsv)
-        temporary_ortholog.replace(outputs.ortholog_evidence_summary_tsv)
 
     support_metrics = {
         key: sum(result.exact_support[key] for result in partition_results)
@@ -471,11 +408,6 @@ def build_or_load_annotation_support(
                 "columns": VARIANT_STRATEGY_SUPPORT_FIELDS,
                 "row_count": support_row_count,
                 "output": file_identity(outputs.variant_strategy_support_tsv),
-            },
-            "ortholog_evidence_summary": {
-                "columns": ORTHOLOG_EVIDENCE_FIELDS,
-                "row_count": ortholog_row_count,
-                "output": file_identity(outputs.ortholog_evidence_summary_tsv),
             },
             "partitions": {
                 "total": len(partition_results),
@@ -563,12 +495,6 @@ def _checkpoint_partition_result(
 def _run_partition_build(spec: PartitionBuildSpec) -> PartitionSupportResult:
     spec.work_dir.mkdir()
     profiles = load_taxonomy_profiles(spec.taxonomy)
-    failure_rows = list(
-        _iter_required_tsv(
-            spec.failures,
-            {"source", "scope", "chrom", "start", "end"},
-        )
-    )
     connection = duckdb.connect(str(spec.work_dir / "source_annotations.duckdb"))
     try:
         memory_limit = os.environ.get(
@@ -587,9 +513,7 @@ def _run_partition_build(spec: PartitionBuildSpec) -> PartitionSupportResult:
             partition_dir=spec.partition_dir,
             map_path=spec.map_path,
             taxonomy=spec.taxonomy,
-            target_features=spec.target_features,
             profiles=profiles,
-            failure_rows=failure_rows,
             work_dir=spec.work_dir,
         )
     finally:
@@ -603,9 +527,7 @@ def _build_partition_support(
     partition_dir: Path,
     map_path: Path,
     taxonomy: Path,
-    target_features: Path,
     profiles: dict,
-    failure_rows: list[dict[str, str]],
     work_dir: Path,
 ) -> PartitionSupportResult:
     partition_id = partition_dir.name
@@ -613,8 +535,6 @@ def _build_partition_support(
     phase_started = time.perf_counter()
     _load_source_annotations(connection, variant_source)
     _record_timing(timings, "load_source_annotations", phase_started)
-    alt_support_path = work_dir / "snv_alt_taxonomic_support.tsv.gz"
-    snv_sites_path = work_dir / ".snv_sites.tsv"
     exact_support_spool = ExactSupportSpool(work_dir / ".exact_support_rows.tsv")
     phase_started = time.perf_counter()
     with exact_support_spool:
@@ -624,8 +544,6 @@ def _build_partition_support(
             partition_dir / EVENT_SUPPORT_FILENAME,
             map_path,
             profiles,
-            alt_support_path,
-            snv_sites_path,
             exact_support_spool,
         )
     _record_timing(timings, "aggregate_event_support", phase_started)
@@ -644,38 +562,8 @@ def _build_partition_support(
         "canonical_support_edge_count": exact_support_spool.input_edge_count,
         "exact_support_edge_count": exact_edge_count,
     }
-    site_depth_path = work_dir / "snv_site_depth.tsv.gz"
-    taxonomic_depth_path = work_dir / "snv_taxonomic_depth.tsv.gz"
     phase_started = time.perf_counter()
-    with prepare_snv_sites(
-        _iter_spooled_snv_sites(snv_sites_path), work_dir
-    ) as prepared_sites:
-        _record_timing(timings, "snv_site_index", phase_started)
-        phase_started = time.perf_counter()
-        write_snv_site_depth(
-            [partition_dir / SEGMENTS_FILENAME],
-            (),
-            site_depth_path,
-            work_dir,
-            prepared_sites=prepared_sites,
-        )
-        _record_timing(timings, "snv_site_depth", phase_started)
-        phase_started = time.perf_counter()
-        write_snv_taxonomic_depth(
-            [partition_dir / SEGMENTS_FILENAME],
-            (),
-            taxonomy,
-            taxonomic_depth_path,
-            work_dir,
-            prepared_sites=prepared_sites,
-        )
-        _record_timing(timings, "snv_taxonomic_depth", phase_started)
-    phase_started = time.perf_counter()
-    support_rows, missing_key_count = build_variant_strategy_support(
-        aggregates,
-        load_snv_site_depth(site_depth_path),
-        load_snv_alt_family_support(alt_support_path),
-    )
+    support_rows, missing_key_count = build_variant_strategy_support(aggregates)
     if missing_key_count:
         raise ValueError(
             f"Canonical event map omitted {missing_key_count} support group(s) "
@@ -698,51 +586,18 @@ def _build_partition_support(
         connection,
         {str(item.get("gene_id") or "") for item in aggregates},
     )
-    gnomad_cache: dict[tuple[str, int, str, str], dict[str, object]] = {}
     for aggregate in aggregates:
-        key = (
-            str(aggregate.get("gene_id") or ""),
-            str(aggregate.get("variant_key") or ""),
-        )
+        key = (str(aggregate.get("gene_id") or ""), str(aggregate.get("variant_key") or ""))
         annotation = annotation_rows.get(key)
         if annotation is None:
-            raise ValueError(
-                "Source variant annotations are missing canonical event support "
-                f"for partition {partition_id}: {key}"
-            )
+            raise ValueError(f"Source variant annotations are missing canonical event support in {partition_id}: {key}")
         if annotation["lookup_status"] != aggregate.get("lookup_status"):
-            raise ValueError(
-                f"Normalization status differs for {key}: "
-                f"map={aggregate.get('lookup_status')!r}, "
-                f"annotation={annotation['lookup_status']!r}"
-            )
-        lookup_key = aggregate.get("_lookup_key")
-        if annotation["gnomad_af"] and lookup_key is not None:
-            gnomad_cache[lookup_key] = {"exome": {"af": annotation["gnomad_af"]}}
-    statuses = build_gnomad_statuses(aggregates, gnomad_cache, failure_rows)
-    for aggregate in aggregates:
-        annotation = annotation_rows[(str(aggregate.get("gene_id") or ""), str(aggregate.get("variant_key") or ""))]
-        explicit = annotation.get("gnomad_lookup_status", "")
-        if aggregate.get("event_type") == "snv" and explicit in {"found", "not_found"}:
-            key = (str(aggregate.get("gene_id") or ""), int(aggregate.get("target_start0") or 0),
-                   str(aggregate.get("ref") or "").upper(), str(aggregate.get("alt") or "").upper())
-            statuses[key] = explicit
+            raise ValueError(f"Normalization status differs for {key}")
     _record_timing(timings, "join_source_annotations", phase_started)
-    ortholog_path = work_dir / ORTHOLOG_EVIDENCE_FILENAME
-    phase_started = time.perf_counter()
-    ortholog_count = write_ortholog_evidence_summary(
-        taxonomic_depth_path,
-        alt_support_path,
-        [target_features],
-        statuses,
-        ortholog_path,
-    )
-    _record_timing(timings, "ortholog_evidence_summary", phase_started)
     return PartitionSupportResult(
         partition_id=partition_id,
         directory=work_dir,
         support_row_count=len(support_rows),
-        ortholog_row_count=ortholog_count,
         exact_support=exact_support,
         timings_seconds=timings,
         reused=False,
@@ -764,9 +619,7 @@ def _write_partition_checkpoint(
     )
     try:
         support_path = staging_dir / VARIANT_SUPPORT_FILENAME
-        ortholog_path = staging_dir / ORTHOLOG_EVIDENCE_FILENAME
         (result.directory / VARIANT_SUPPORT_FILENAME).replace(support_path)
-        (result.directory / ORTHOLOG_EVIDENCE_FILENAME).replace(ortholog_path)
         write_json_atomic(
             staging_dir / "manifest.json",
             {
@@ -782,11 +635,6 @@ def _write_partition_checkpoint(
                     "row_count": result.support_row_count,
                     "output": file_identity(support_path),
                 },
-                "ortholog_evidence_summary": {
-                    "columns": ORTHOLOG_EVIDENCE_FIELDS,
-                    "row_count": result.ortholog_row_count,
-                    "output": file_identity(ortholog_path),
-                },
             },
         )
         staging_dir.replace(checkpoint_dir)
@@ -796,7 +644,6 @@ def _write_partition_checkpoint(
         partition_id=result.partition_id,
         directory=checkpoint_dir,
         support_row_count=result.support_row_count,
-        ortholog_row_count=result.ortholog_row_count,
         exact_support=result.exact_support,
         timings_seconds=result.timings_seconds,
         reused=False,
@@ -810,11 +657,9 @@ def _load_partition_checkpoint(
 ) -> PartitionSupportResult | None:
     manifest_path = checkpoint_dir / "manifest.json"
     support_path = checkpoint_dir / VARIANT_SUPPORT_FILENAME
-    ortholog_path = checkpoint_dir / ORTHOLOG_EVIDENCE_FILENAME
     if (
         not manifest_path.is_file()
         or not support_path.is_file()
-        or not ortholog_path.is_file()
     ):
         return None
     try:
@@ -829,10 +674,7 @@ def _load_partition_checkpoint(
             == VARIANT_STRATEGY_SUPPORT_FIELDS
             and manifest.get("variant_strategy_support", {}).get("output")
             == file_identity(support_path)
-            and manifest.get("ortholog_evidence_summary", {}).get("columns")
-            == ORTHOLOG_EVIDENCE_FIELDS
-            and manifest.get("ortholog_evidence_summary", {}).get("output")
-            == file_identity(ortholog_path)
+
         ):
             return None
         exact_support = manifest.get("exact_support")
@@ -844,9 +686,6 @@ def _load_partition_checkpoint(
             directory=checkpoint_dir,
             support_row_count=int(
                 manifest["variant_strategy_support"]["row_count"]
-            ),
-            ortholog_row_count=int(
-                manifest["ortholog_evidence_summary"]["row_count"]
             ),
             exact_support={
                 key: int(exact_support[key])
@@ -871,8 +710,6 @@ def _common_checkpoint_inputs(inputs: dict[str, object]) -> dict[str, object]:
         key: inputs[key]
         for key in (
             "taxonomy",
-            "target_features",
-            "failures",
         )
     }
 
@@ -918,8 +755,6 @@ def _collapse_partition(
     event_support_path: Path,
     event_map_path: Path,
     profiles: dict,
-    alt_support_path: Path,
-    snv_sites_path: Path,
     exact_support_spool: ExactSupportSpool,
 ) -> list[dict | None]:
     """Join partition-local lineage streams while holding one exact-support group."""
@@ -930,23 +765,7 @@ def _collapse_partition(
         gzip.open(events_path, "rt", newline="") as event_handle,
         gzip.open(event_map_path, "rt", newline="") as map_handle,
         EventOrthologSupportStream(event_support_path) as support_stream,
-        gzip.open(alt_support_path, "wt", newline="") as alt_handle,
-        snv_sites_path.open("w", newline="") as sites_handle,
     ):
-        alt_writer = csv.DictWriter(
-            alt_handle,
-            fieldnames=SNV_ALT_TAXONOMIC_SUPPORT_FIELDS,
-            delimiter="\t",
-            lineterminator="\n",
-        )
-        alt_writer.writeheader()
-        sites_writer = csv.DictWriter(
-            sites_handle,
-            fieldnames=["gene_id", "strategy", "target_start0"],
-            delimiter="\t",
-            lineterminator="\n",
-        )
-        sites_writer.writeheader()
         event_reader = csv.DictReader(event_handle, delimiter="\t")
         if event_reader.fieldnames != COMPACT_EVENT_FIELDS:
             raise ValueError(
@@ -981,15 +800,8 @@ def _collapse_partition(
                     f"partition={partition_id}, expected={expected_id}, "
                     f"event={event_group_id}, map={map_group_id}"
                 )
-            site = snv_event_site(event_row)
-            if site is not None:
-                sites_writer.writerow(site)
             support_rows = support_stream.take(event_group_id)
             _validate_exact_event_support(event_row, support_rows, event_support_path)
-            alt_row = _alt_taxonomic_support_row(event_row, support_rows, profiles)
-            if alt_row is not None:
-                alt_writer.writerow(alt_row)
-
             variant_key = str(map_row.get("variant_key") or "")
             if not variant_key:
                 continue
@@ -1011,10 +823,18 @@ def _collapse_partition(
                     "lookup_status": map_row.get("normalization_status", ""),
                     "_lookup_key": lookup_key,
                     "_support_by_strategy": {},
+                    "_taxonomy_depth_by_strategy": {},
                     "_variant_context_id": len(aggregates_by_id),
                 }
                 aggregates[aggregate_key] = aggregate
                 aggregates_by_id.append(aggregate)
+            strategy = str(event_row.get("strategy") or "")
+            depths = aggregate["_taxonomy_depth_by_strategy"]
+            for row in support_rows:
+                tax_id = str(row.get("tax_id") or "")
+                if tax_id not in profiles:
+                    raise ValueError(f"Exact ortholog support references unknown tax_id: {tax_id!r}")
+                depths[strategy] = max(depths.get(strategy, 0), profiles[tax_id].human_lineage_depth)
             exact_support_spool.add_group(
                 variant_context_id=int(aggregate["_variant_context_id"]),
                 gene_id=str(aggregate.get("gene_id") or ""),
@@ -1023,52 +843,6 @@ def _collapse_partition(
             )
         support_stream.finish()
     return aggregates_by_id
-
-
-def _iter_spooled_snv_sites(path: Path):
-    with path.open(newline="") as handle:
-        yield from csv.DictReader(handle, delimiter="\t")
-
-
-def _alt_taxonomic_support_row(
-    event_row: dict[str, str],
-    support_rows: list[dict[str, str]],
-    profiles: dict,
-) -> dict[str, object] | None:
-    ref = str(event_row.get("ref") or "").upper()
-    alt = str(event_row.get("alt") or "").upper()
-    if (
-        event_row.get("event_type") != "snv"
-        or len(ref) != 1
-        or len(alt) != 1
-        or ref not in DNA_BASES
-        or alt not in DNA_BASES
-    ):
-        return None
-    counts = count_member_groups(
-        (
-            (str(row.get("ortholog_gene_id") or ""), str(row.get("tax_id") or ""))
-            for row in support_rows
-            if row.get("tax_id")
-        ),
-        profiles,
-    )
-    if counts["all__ortholog"] < 1:
-        return None
-    families = {
-        profiles[row["tax_id"]].family_id
-        for row in support_rows
-        if row.get("tax_id") and profiles[row["tax_id"]].family_id
-    }
-    return {
-        "gene_id": event_row["gene_id"],
-        "strategy": event_row["strategy"],
-        "target_start0": event_row["target_start0"],
-        "ref": ref,
-        "alt": alt,
-        **counts,
-        ALT_SUPPORT_FAMILY_COLUMN: len(families),
-    }
 
 
 def _validate_exact_event_support(
@@ -1099,7 +873,6 @@ def _validate_exact_event_support(
 
 
 def _load_source_annotations(connection, source: VariantTableSource) -> None:
-    explicit = "gnomad_lookup_status" if "gnomad_lookup_status" in source.columns else "''"
     connection.execute("DROP TABLE IF EXISTS source_annotations")
     connection.execute(
         f"""
@@ -1107,9 +880,7 @@ def _load_source_annotations(connection, source: VariantTableSource) -> None:
         SELECT
             CAST(variant_key AS VARCHAR) AS variant_key,
             CAST(gene_id AS VARCHAR) AS gene_id,
-            CAST(lookup_status AS VARCHAR) AS lookup_status,
-            CAST(gnomad_af AS VARCHAR) AS gnomad_af,
-            CAST({explicit} AS VARCHAR) AS gnomad_lookup_status
+            CAST(lookup_status AS VARCHAR) AS lookup_status
         FROM {variant_source_sql(source)}
         """
     )
@@ -1130,9 +901,9 @@ def _source_annotations_for_genes(
             [(gene_id,) for gene_id in sorted(gene_ids)],
         )
     rows: dict[tuple[str, str], dict[str, str]] = {}
-    for variant_key, gene_id, lookup_status, gnomad_af, explicit in connection.execute(
+    for variant_key, gene_id, lookup_status in connection.execute(
         """
-        SELECT a.variant_key, a.gene_id, a.lookup_status, a.gnomad_af, a.gnomad_lookup_status
+        SELECT a.variant_key, a.gene_id, a.lookup_status
         FROM source_annotations AS a
         JOIN requested_genes AS g USING (gene_id)
         """
@@ -1140,8 +911,6 @@ def _source_annotations_for_genes(
         key = (str(gene_id or ""), str(variant_key or ""))
         observed = {
             "lookup_status": str(lookup_status or ""),
-            "gnomad_af": str(gnomad_af or ""),
-            "gnomad_lookup_status": str(explicit or ""),
         }
         previous = rows.setdefault(key, observed)
         if previous != observed:
@@ -1186,7 +955,7 @@ def _resolve_partition_dirs(
 
 def _validate_partition_inputs(partition_dirs: list[Path], map_root: Path) -> None:
     for partition_dir in partition_dirs:
-        for filename in (EVENTS_FILENAME, SEGMENTS_FILENAME, EVENT_SUPPORT_FILENAME):
+        for filename in (EVENTS_FILENAME, EVENT_SUPPORT_FILENAME):
             path = partition_dir / filename
             if not path.is_file():
                 raise FileNotFoundError(
@@ -1221,10 +990,8 @@ def _input_identities(
     partition_dirs: list[Path],
     map_root: Path,
     taxonomy: Path,
-    target_features: Path,
     variant_source: VariantTableSource,
     variant_sources: dict[str, VariantTableSource],
-    failures: Path,
     alignment_manifest: Path,
     annotation_manifest: Path,
 ) -> dict[str, object]:
@@ -1232,14 +999,11 @@ def _input_identities(
         "alignment_manifest": content_identity(alignment_manifest),
         "annotation_manifest": content_identity(annotation_manifest),
         "taxonomy": content_identity(taxonomy),
-        "target_features": content_identity(target_features),
         "variant_annotations": variant_source.identity,
-        "failures": file_identity(failures),
         "partitions": [
             {
                 "partition_id": partition_dir.name,
                 "events": file_identity(partition_dir / EVENTS_FILENAME),
-                "segments": file_identity(partition_dir / SEGMENTS_FILENAME),
                 "event_ortholog_support": file_identity(
                     partition_dir / EVENT_SUPPORT_FILENAME
                 ),
@@ -1272,7 +1036,6 @@ def _cache_is_valid(
         path.is_file()
         for path in (
             outputs.variant_strategy_support_tsv,
-            outputs.ortholog_evidence_summary_tsv,
         )
     ):
         return False
@@ -1287,22 +1050,10 @@ def _cache_is_valid(
             == VARIANT_STRATEGY_SUPPORT_FIELDS
             and manifest.get("variant_strategy_support", {}).get("output")
             == file_identity(outputs.variant_strategy_support_tsv)
-            and manifest.get("ortholog_evidence_summary", {}).get("columns")
-            == ORTHOLOG_EVIDENCE_FIELDS
-            and manifest.get("ortholog_evidence_summary", {}).get("output")
-            == file_identity(outputs.ortholog_evidence_summary_tsv)
+
         )
     except (OSError, ValueError, json.JSONDecodeError):
         return False
-
-
-def _iter_required_tsv(path: Path, required: set[str]):
-    with gzip.open(path, "rt", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        missing = required - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(f"{path} missing columns: {', '.join(sorted(missing))}")
-        yield from reader
 
 
 def _positive_int(value: object, label: str) -> int:

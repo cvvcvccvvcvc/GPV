@@ -10,8 +10,6 @@ import pytest
 
 from bin.fetch_taxonomy import fetch_taxonomy_records, taxonomy_row
 from bin.merge_alignment_results import write_compact_events
-from analytics.derivations.ortholog_evidence import write_ortholog_evidence_summary
-from analytics.derivations.support import merge_ortholog_evidence
 from analytics.derivations.taxonomy import (
     COUNT_KEYS,
     SCOPE_ANCESTORS,
@@ -452,114 +450,26 @@ def test_compact_events_use_numeric_site_order(tmp_path: Path) -> None:
     ]
 
 
-def test_compact_evidence_summary_preserves_scope_unit_and_gnomad_status(tmp_path: Path) -> None:
-    profiles = load_taxonomy_profiles(taxonomy_fixture(tmp_path))
-    depth_counts = count_member_groups(
-        [("chimp_gene", "9598"), ("mouse_gene", "10090")],
-        profiles,
-    )
-    chimp_alt = count_member_groups([("chimp_gene", "9598")], profiles)
-    mouse_alt = count_member_groups([("mouse_gene", "10090")], profiles)
-    depth = tmp_path / "snv_taxonomic_depth.tsv.gz"
-    alt = tmp_path / "snv_alt_taxonomic_support.tsv.gz"
-    features = tmp_path / "1.tsv.gz"
-    output = tmp_path / "ortholog_evidence_summary.tsv.gz"
-    write_tsv_gz(
-        depth,
-        ["gene_id", "strategy", "target_start0", *COUNT_KEYS],
-        [{"gene_id": "1", "strategy": "s1", "target_start0": 4, **depth_counts}],
-    )
-    write_tsv_gz(
-        alt,
-        ["gene_id", "strategy", "target_start0", "ref", "alt", *COUNT_KEYS],
-        [
-            {"gene_id": "1", "strategy": "s1", "target_start0": 4, "ref": "A", "alt": "G", **chimp_alt},
-            {"gene_id": "1", "strategy": "s1", "target_start0": 4, "ref": "A", "alt": "T", **mouse_alt},
-        ],
-    )
-    write_tsv_gz(
-        features,
-        ["gene_id", "feature_type", "target_start0", "target_end0"],
-        [
-            {"gene_id": "1", "feature_type": "gene", "target_start0": 0, "target_end0": 10},
-            {"gene_id": "1", "feature_type": "cds", "target_start0": 0, "target_end0": 10},
-        ],
-    )
-
-    row_count = write_ortholog_evidence_summary(
-        depth,
-        alt,
-        [features],
-        {
-            ("1", 4, "A", "G"): "found",
-            ("1", 4, "A", "T"): "lookup_failed",
-        },
-        output,
-    )
-
-    assert row_count > 0
-    with gzip.open(output, "rt", newline="") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
-    all_ortholog = next(
-        row
-        for row in rows
-        if row["taxonomic_scope"] == "all"
-        and row["evidence_unit"] == "ortholog"
-        and row["alt_support_count"] == "1"
-    )
-    assert all_ortholog["site_aligned_count"] == "2"
-    assert all_ortholog["gnomad_found_count"] == "1"
-    assert all_ortholog["gnomad_lookup_failed_count"] == "1"
-    primate = next(
-        row
-        for row in rows
-        if row["taxonomic_scope"] == "primates"
-        and row["evidence_unit"] == "species"
-        and row["alt_support_count"] == "1"
-    )
-    assert primate["site_aligned_count"] == "1"
-    assert primate["alt_support_count"] == "1"
-    assert primate["gnomad_found_count"] == "1"
 
 
-def test_finalizer_sums_matching_partition_histograms(tmp_path: Path) -> None:
-    fields = [
-        "strategy",
-        "target_context",
-        "taxonomic_scope",
-        "evidence_unit",
-        "site_aligned_count",
-        "alt_support_count",
-        "gnomad_found_count",
-        "gnomad_not_found_count",
-        "gnomad_lookup_failed_count",
-    ]
-    partitions = []
-    for index, found in enumerate((2, 3), start=1):
-        partition = tmp_path / f"partition_{index:06d}"
-        partition.mkdir()
-        write_tsv_gz(
-            partition / "ortholog_evidence_summary.tsv.gz",
-            fields,
-            [
-                {
-                    "strategy": "s1",
-                    "target_context": "cds",
-                    "taxonomic_scope": "mammalia",
-                    "evidence_unit": "species",
-                    "site_aligned_count": 10,
-                    "alt_support_count": 2,
-                    "gnomad_found_count": found,
-                    "gnomad_not_found_count": 1,
-                    "gnomad_lookup_failed_count": 0,
-                }
-            ],
-        )
-        partitions.append((partition, {"ortholog_evidence_summary_count": 1}))
-
-    output = tmp_path / "merged.tsv.gz"
-    assert merge_ortholog_evidence(partitions, output) == 1
-    with gzip.open(output, "rt", newline="") as handle:
-        row = next(csv.DictReader(handle, delimiter="\t"))
-    assert row["gnomad_found_count"] == "5"
-    assert row["gnomad_not_found_count"] == "2"
+def test_human_lineage_counts_unique_ortholog_genes_and_unknown_taxonomy(tmp_path):
+    from analytics.derivations.taxonomy import HUMAN_LINEAGE, lineage_ortholog_counts
+    taxonomy = taxonomy_fixture(tmp_path)
+    profiles = load_taxonomy_profiles(taxonomy)
+    taxa = list(profiles)
+    selected = tmp_path / 'selected.tsv.gz'
+    write_tsv_gz(selected, ['query_gene_id', 'ortholog_gene_id', 'tax_id'], [
+        dict(query_gene_id=gene, ortholog_gene_id=ortholog, tax_id=tax_id)
+        for gene,ortholog,tax_id in [('1','a',taxa[0]),('2','a',taxa[0]),('1','b',taxa[1])]
+    ])
+    rows = lineage_ortholog_counts([taxonomy], [selected])
+    assert rows[0]['ortholog_count'] == 2
+    assert [r['taxon'] for r in rows] == [label for _,label in HUMAN_LINEAGE]
+    for row in rows:
+        assert row['ortholog_count'] == sum(profiles[tax_id].human_lineage_depth >= row['threshold'] for tax_id in taxa[:2])
+    assert all(a['ortholog_count'] >= b['ortholog_count'] for a,b in zip(rows,rows[1:]))
+    write_tsv_gz(selected, ['query_gene_id', 'ortholog_gene_id', 'tax_id'], [
+        dict(query_gene_id='1', ortholog_gene_id='a', tax_id=tax_id) for tax_id in taxa[:2]
+    ])
+    with pytest.raises(ValueError, match='conflicting tax IDs'):
+        lineage_ortholog_counts([taxonomy], [selected])

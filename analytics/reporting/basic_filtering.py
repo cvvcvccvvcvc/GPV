@@ -8,9 +8,11 @@ from analytics.analyses.basic_filtering import (
     BasicFilteringAnalysis,
     FILTER_OPTIONS,
     UNION_STRATEGY,
+    UNION_LABEL,
     CANDIDATE_CONSEQUENCE_OPTIONS as CONSEQUENCE_OPTIONS,
 )
 from analytics.analyses.conservation_validation import TARGET_CONTEXT_OPTIONS, VARIANT_TYPE_OPTIONS
+from analytics.derivations.taxonomy import HUMAN_LINEAGE
 from .components import dataframe_records, strategy_label
 
 
@@ -25,6 +27,8 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
         else []
     )
     payload = {
+        "lineage": [{"taxId": tax_id, "label": label} for tax_id, label in HUMAN_LINEAGE],
+        "unionLabel": UNION_LABEL,
         "filters": [{"key": key, "label": label} for key, label, _column in FILTER_OPTIONS],
         "strategies": [
             {"key": key, "label": strategy_label(key)}
@@ -60,7 +64,7 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
       const selects = Object.fromEntries(roles.map(role => [role,
         document.querySelector('#tab-basic-filtering [data-role="' + role + '"]')]));
       const addOptions = (select, options) => options.forEach(item => select.add(new Option(item.label, item.key)));
-      const union = {key: 'union', label: 'Union (any strategy)'};
+      const union = {key: 'union', label: config.unionLabel};
       addOptions(selects.filter, config.filters);
       addOptions(selects['variant-type'], config.variantTypes);
       addOptions(selects['candidate-strategy'], [{key: 'compare', label: 'Compare all strategies'}, ...config.strategies, union]);
@@ -70,13 +74,14 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
       const labels = Object.fromEntries([...config.strategies, union].map(item => [item.key, item.label]));
       const color = strategy => strategy === 'union' ? '#242424' : colors[config.strategies.findIndex(item => item.key === strategy) % colors.length];
       const count = value => Number(value || 0).toLocaleString('en-US');
-      const atMost = () => selects.filter.value === 'aligned_max';
-      const symbol = () => atMost() ? '≤' : '≥';
-      const supported = () => selects['variant-type'].value === 'snv' || ['ortholog', 'strategy'].includes(selects.filter.value);
+      const taxonomy = () => selects.filter.value === 'taxonomy';
+      const symbol = () => '≥';
       const commonRows = row => row.filter_key === selects.filter.value && row.variant_type === selects['variant-type'].value
         && row.target_context === selects['target-context'].value && row.consequence === selects.consequence.value;
       const logarithmic = () => selects['threshold-scale'].value === 'log';
       const xaxis = (groups, logScale) => {
+        if (taxonomy()) return {title: {text: 'Human lineage: broad → narrow'}, type: 'category',
+          categoryorder: 'array', categoryarray: config.lineage.map(item => item.label), tickangle: -55};
         if (!logScale) return {title: {text: 'Threshold (' + symbol() + ' N)'}, type: 'linear', rangemode: 'tozero'};
         const max = Math.max(1, ...groups.map(group => group.rows.length ? group.rows[group.rows.length - 1].threshold : 0));
         const ticks = [0];
@@ -92,18 +97,19 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
         element.hidden = !text;
       }
       function renderCandidate() {
+        selects['threshold-scale'].disabled = taxonomy();
         const selection = selects['candidate-strategy'].value;
         const strategies = selection === 'compare' ? config.strategies.map(item => item.key) : [selection];
         const groups = strategies.map(strategy => ({strategy, rows: config.candidate.filter(row =>
-          supported() && commonRows(row) && row.strategy === strategy).sort((a, b) => a.threshold - b.threshold)}));
+          commonRows(row) && row.strategy === strategy).sort((a, b) => a.threshold - b.threshold)}));
         const traces = (gnomad, logScale) => groups.filter(group => group.rows.length).map(({strategy, rows}) => ({
-          type: 'scatter', mode: 'lines', name: labels[strategy], line: {color: color(strategy), width: 2, shape: 'hv'},
-          connectgaps: false, x: rows.map(row => logScale ? row.threshold + 1 : row.threshold),
+          type: 'scatter', mode: taxonomy() ? 'lines+markers' : 'lines', name: labels[strategy], line: {color: color(strategy), width: 2, shape: 'hv'},
+          connectgaps: false, x: rows.map(row => taxonomy() ? config.lineage[row.threshold].label : logScale ? row.threshold + 1 : row.threshold),
           y: rows.map(row => gnomad ? row.gnomad_found_fraction : row.retained_fraction),
           customdata: rows.map(row => gnomad
-            ? [row.threshold, count(row.gnomad_found_count), count(row.gnomad_eligible_count), count(row.gnomad_lookup_failed_count)]
-            : [row.threshold, count(row.retained_variant_count), count(row.total_variant_count)]),
-          hovertemplate: 'Threshold ' + symbol() + ' %{customdata[0]}<br>' + (gnomad
+            ? [taxonomy() ? config.lineage[row.threshold].label : row.threshold, count(row.gnomad_found_count), count(row.gnomad_eligible_count), count(row.gnomad_lookup_failed_count)]
+            : [taxonomy() ? config.lineage[row.threshold].label : row.threshold, count(row.retained_variant_count), count(row.total_variant_count)]),
+          hovertemplate: (taxonomy() ? 'Clade: ' : 'Threshold ' + symbol() + ' ') + '%{customdata[0]}<br>' + (gnomad
             ? 'gnomAD: %{customdata[1]} / %{customdata[2]}<br>Found: %{y:.2%}<br>Failed lookups excluded: %{customdata[3]}'
             : 'Retained: %{customdata[1]} / %{customdata[2]}<br>Fraction: %{y:.2%}') + '<extra>%{fullData.name}</extra>',
         }));
@@ -111,15 +117,14 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
           ['retention', false, 'Candidate alleles retained', 'Fraction retained'],
           ['gnomad', true, 'Exact alleles found in gnomAD', 'gnomAD found fraction'],
         ]) {
-          const logScale = !gnomad && logarithmic();
+          const logScale = !taxonomy() && !gnomad && logarithmic();
           Plotly.react('basic-filtering-' + id, traces(gnomad, logScale), {
-            title: {text: title}, template: 'plotly_white', height: 410, margin: {l: 72, r: 25, t: 55, b: 110},
+            title: {text: title}, template: 'plotly_white', height: taxonomy() ? 510 : 410, margin: {l: 72, r: 25, t: 55, b: taxonomy() ? 175 : 110},
             xaxis: xaxis(groups, logScale), yaxis: {title: {text: ylabel}, tickformat: '.0%', range: [0, 1]},
             legend: {orientation: 'h', x: 0, y: -0.3, yanchor: 'top'},
           }, {responsive: true});
         }
-        note('basic-filtering-candidate-status', !supported() ? 'This filter is available for SNVs only.'
-          : groups.every(group => !group.rows.length) ? 'No candidate alleles for this selection.' : '');
+        note('basic-filtering-candidate-status', groups.every(group => !group.rows.length) ? 'No candidate alleles for this selection.' : '');
       }
       roles.forEach(role => selects[role].addEventListener('change', renderCandidate));
       renderCandidate();

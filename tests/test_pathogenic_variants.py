@@ -88,8 +88,6 @@ def test_pathogenic_analysis_builds_condition_backgrounds_and_unique_snv_support
                 "strategy": "s1",
                 "alt_support_row_count": 4,
                 "alt_support_ortholog_count": 4,
-                "alt_support_family_count": 3,
-                "site_aligned_ortholog_count": 10,
             },
             {
                 "variant_key": "1:200:A>AT",
@@ -97,8 +95,6 @@ def test_pathogenic_analysis_builds_condition_backgrounds_and_unique_snv_support
                 "strategy": "s1",
                 "alt_support_row_count": 2,
                 "alt_support_ortholog_count": 2,
-                "alt_support_family_count": 1,
-                "site_aligned_ortholog_count": 8,
             },
         ]
     )
@@ -252,8 +248,6 @@ def test_pathogenic_violin_displays_counts_on_log_ticks(tmp_path: Path) -> None:
                 "gene_id": "1",
                 "strategy": strategy,
                 "alt_support_ortholog_count": count,
-                "alt_support_family_count": 1,
-                "site_aligned_ortholog_count": 400,
             }
             for strategy in ["s1", "s2"]
             for index, count in enumerate([1, 1, 1, 2, 2, 3, 4, 24, 330])
@@ -280,8 +274,6 @@ def test_pathogenic_support_hides_individual_points_for_large_groups() -> None:
                 "gene_id": "1",
                 "strategy": "s1",
                 "alt_support_ortholog_count": index % 5 + 1,
-                "alt_support_family_count": 1,
-                "site_aligned_ortholog_count": 400,
             }
             for index in range(251)
         ]
@@ -405,8 +397,7 @@ def test_pathogenic_filtered_report_smoke(tmp_path: Path) -> None:
         })
         for strategy in strategies.split(','):
             support.append({'variant_key':key,'gene_id':gene,'strategy':strategy,
-                'alt_support_row_count':count,'alt_support_ortholog_count':count,
-                'alt_support_family_count':2,'site_aligned_ortholog_count':20})
+                'alt_support_row_count':count,'alt_support_ortholog_count':count})
         universe.append({'variant_key':key,'gene_ids':gene,'variant_type':'snv' if event=='snv' else 'indel',
             'label_class':'pathogenic','clinvar_disease_names':disease,'clinvar_disease_ids':ids})
         vcf_rows.append(f'1\t{pos}\t{pos}\t{ref}\t{alt}\t.\t.\tCLNSIG=Pathogenic;CLNDN={disease};CLNDISDB={ids}\n')
@@ -418,12 +409,7 @@ def test_pathogenic_filtered_report_smoke(tmp_path: Path) -> None:
     pd.DataFrame(rows).to_csv(annotation,sep='\t',index=False)
     support_path = tmp_path / 'support.tsv.gz'
     pd.DataFrame(support).to_csv(support_path,sep='\t',index=False)
-    ortholog_path = tmp_path / 'ortholog.tsv.gz'
-    pd.DataFrame(columns=['strategy','target_context','taxonomic_scope','evidence_unit',
-        'site_aligned_count','alt_support_count','gnomad_found_count','gnomad_not_found_count',
-        'gnomad_lookup_failed_count']).to_csv(ortholog_path,sep='\t',index=False)
-    kwargs = dict(strategy_label=str, variant_strategy_support_path=support_path,
-                  ortholog_evidence_summary_path=ortholog_path)
+    kwargs = dict(strategy_label=str, variant_strategy_support_path=support_path)
     summary = build_variant_summary(annotation, derived, **kwargs)
     cached = build_variant_summary(annotation, derived, **kwargs)
     assert cached.cache_hit

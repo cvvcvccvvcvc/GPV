@@ -129,8 +129,8 @@ Analytics derives and fingerprints:
 
 - strategy summary and feature coverage from Stage 2 summaries and segments;
 - taxonomy summary from selected orthologs and canonical Stage 1 taxonomy;
-- variant-strategy support and taxonomic depth/support from exact Stage 2
-  evidence plus Stage 3 event lineage;
+- exact variant-strategy support and deepest supporting human-lineage clade
+  from Stage 2 ortholog identities plus Stage 3 normalized event lineage;
 - `analyses/<analysis-id>/derived/pathogenic_clinvar_hits.tsv.gz`, the complete
   pathogenic/likely-pathogenic allele detail and support table;
 - run-set scientific tables used by report sections.
@@ -177,8 +177,10 @@ cache identity. Local VEP is probed before an analysis workspace is created.
 
 ## Report Semantics
 
-Ortholog support and taxonomy are shared inputs to support filters, scientific
-summaries, and QC. Their preparation is independent of the report's tab list.
+Ortholog support and taxonomy feed support filters and QC. The retired
+Ortholog Evidence heatmap/histogram preparation, family-support counts, and
+site-aligned depth products are no longer calculated or stored. P/LP support
+views retain exact supporting-ortholog counts, without those obsolete fields.
 
 gnomAD Stratification is opt-in via `--gnomad-stratification`. When disabled,
 its tab shows the enable option without building plots, as Matched Control does.
@@ -272,8 +274,13 @@ selection apply to both retention and gnomAD. Basic Filtering is descriptive:
 it does not calculate ClinVar associations, odds ratios, or threshold p-values.
 
 `Compare all strategies` uses each strategy's own candidate denominator.
-`Union (any strategy)` counts each normalized allele once and accepts it when
-at least one calling strategy/context passes.
+`Union (excluding minimap2 map-ont)` excludes
+`minimap2_map_ont_pseudoreads_30000_15000` before constructing either the allele
+universe or strategy-support counts. Long-read-only alleles are absent; their
+support cannot pass a union threshold. Other calling strategies/contexts use
+any-member semantics and each normalized allele counts once. Individual and
+Compare all strategies views retain all strategies. This exclusion is scoped
+to Basic Filtering and its Candidate Profile lineage curves.
 
 Context is assigned from canonical target features at the first affected
 normalized allele position, using the same context priority as the variant
@@ -285,16 +292,30 @@ VEP annotations remain in `All consequences` and `Not annotated`.
 Both context and consequence must match the same gene-context row before its
 support is eligible. Only then are support scores reduced per allele/strategy
 and union, preventing support from another gene or consequence from passing a
-selected threshold. Strategy support counts all calling strategies for the
-allele; it is not recomputed within a consequence selection.
+selected threshold. Strategy support counts calling strategies for the allele (excluding map-ont
+in Union); it is not recomputed within a consequence or taxonomic selection.
 
-Exact ALT support and strategy support use minimum thresholds. Supporting
-families count distinct known family IDs; an unresolved family is not a new
-family. Site-aligned ortholog filters support both maximum and minimum
-thresholds. Family and site-depth filters are SNV-only. Within an eligible
-allele/strategy selection, maximum support is used for minimum thresholds and
-minimum site depth for maximum thresholds. Zero known families is a valid
-called-SNV score. Invalid required support fails validation.
+There are exactly three filters: minimum exact-ALT ortholog support, minimum
+strategy support, and human-lineage taxonomy. Numeric support takes the maximum
+within eligible allele/strategy contexts, never a sum across strategies.
+Taxonomy retains an allele if at least one exact supporting ortholog belongs to
+the selected clade, for both SNVs and indels. It uses the same normalized
+allele–gene–strategy relation as the numeric filters. It does not realign
+sequences or treat sequence availability as ALT support.
+
+The ordered taxon IDs and names in `HUMAN_LINEAGE` are the fixed human target's
+NCBI ancestry from Eukaryota through Homo, including intermediate clades.
+Membership derives from archived Stage 1 lineage: the deepest known ancestor
+also establishes membership in its broader ancestors. No downstream NCBI
+lookup is performed. `All selected` is the unfiltered baseline; unresolved
+taxonomy contributes only there. Empty clades remain visible with zero retained
+alleles and an undefined gnomAD fraction. Category positions are not evolutionary
+distances. Homo can be empty because selected orthologs are non-human.
+
+Candidate Profile reuses these curves to show unique retained allele counts.
+Its separate ortholog curve counts distinct selected NCBI ortholog Gene IDs
+across target genes, before alignment and independently of strategy; it does
+not count species, alignment rows, or sum duplicate gene-context observations.
 
 Retention's fixed denominator is all candidate alleles in the selected cohort
 for that strategy. Its numerator includes failed gnomAD lookups. The gnomAD
@@ -306,7 +327,8 @@ not a clinical benignity label or a calibrated measure of calling accuracy.
 Candidate retention defaults to a logarithmic threshold axis on `N + 1`, keeping
 threshold zero visible; its scale selector can switch to linear. Tick labels
 and hover report the original threshold `N`. The gnomAD threshold axis always
-uses linear, unshifted `N`. Both fractions remain on linear percentage axes.
+uses linear, unshifted `N`. Both fractions remain on linear percentage axes. Taxonomy uses the same ordered
+categorical axis in both plots; the numeric scale control is disabled for it.
 
 ## Code Owners And Checks
 

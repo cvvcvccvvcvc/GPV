@@ -87,13 +87,12 @@ def test_archive_source_releases_only_its_restore_and_preserves_scientific_ident
             path.mkdir(parents=True)
             for name in {
                 "alignment_aggregates": ["strategy_summary.tsv.gz", "feature_coverage.tsv.gz"],
-                "annotation_support": ["variant_strategy_support.tsv.gz", "ortholog_evidence_summary.tsv.gz"],
+                "annotation_support": ["variant_strategy_support.tsv.gz"],
                 "taxonomy_summary": ["taxonomy_summary.tsv.gz"],
             }[directory]:
                 if name == "variant_strategy_support.tsv.gz":
                     rows = [{"variant_key": "1:101:A>G", "gene_id": "1", "strategy": "s1",
-                             "alt_support_ortholog_count": "1", "alt_support_family_count": "1",
-                             "site_aligned_ortholog_count": "1"}]
+                             "alt_support_ortholog_count": "1", "human_lineage_depth": "0"}]
                     pd.DataFrame(rows).to_csv(path / name, sep="\t", index=False, compression="gzip")
                 else:
                     (path / name).write_bytes(b"derived")
@@ -458,7 +457,6 @@ def _stub_derived_builders(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         assert workers >= 1
         support = analytics_dir / "annotation_support" / "variant_strategy_support.tsv.gz"
-        evidence = analytics_dir / "annotation_support" / "ortholog_evidence_summary.tsv.gz"
         _table(
             support,
             [
@@ -467,22 +465,7 @@ def _stub_derived_builders(monkeypatch: pytest.MonkeyPatch) -> None:
                 "strategy",
                 "alt_support_row_count",
                 "alt_support_ortholog_count",
-                "alt_support_family_count",
-            ],
-            [],
-        )
-        _table(
-            evidence,
-            [
-                "strategy",
-                "target_context",
-                "taxonomic_scope",
-                "evidence_unit",
-                "site_aligned_count",
-                "alt_support_count",
-                "gnomad_found_count",
-                "gnomad_not_found_count",
-                "gnomad_lookup_failed_count",
+                "human_lineage_depth",
             ],
             [],
         )
@@ -496,7 +479,6 @@ def _stub_derived_builders(monkeypatch: pytest.MonkeyPatch) -> None:
             )
         return SimpleNamespace(
             variant_strategy_support_tsv=support,
-            ortholog_evidence_summary_tsv=evidence,
         )
 
     def taxonomy(_run: Path, *, analytics_dir: Path):
