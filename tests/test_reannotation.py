@@ -219,8 +219,8 @@ def test_summary_and_filtering_match_raw_and_materialized_supplements(tmp_path, 
     prepared = tmp_path / 'prepared'
     prepare_variant_parquet(repaired, prepared)
     support = tmp_path / 'support.tsv.gz'
-    _table(support, ['variant_key', 'gene_id', 'strategy', 'alt_support_ortholog_count', 'human_lineage_depth'],
-           [{'variant_key': '1:2:A>G', 'gene_id':'1', 'strategy': 's1', 'alt_support_ortholog_count': 2, 'human_lineage_depth': 0}])
+    _table(support, ['variant_key', 'gene_id', 'strategy', 'alt_support_ortholog_count', 'human_lineage_depth', 'snv_indel_clearance_bp'],
+           [{'variant_key': '1:2:A>G', 'gene_id':'1', 'strategy': 's1', 'alt_support_ortholog_count': 2, 'human_lineage_depth': 0, 'snv_indel_clearance_bp': 500}])
     for index, path in enumerate([source.variant_annotations_source, repaired.variant_annotations_source, prepared / 'manifest.json']):
         status = 'lookup_failed' if index == 0 else expected
         result = aggregate_variant_groups(resolve_variant_aggregation_source(path),

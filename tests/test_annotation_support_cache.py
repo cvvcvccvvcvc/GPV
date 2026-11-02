@@ -409,7 +409,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
     cache_manifest = json.loads(
         (analytics_dir / "annotation_support" / "manifest.json").read_text()
     )
-    assert cache_manifest["schema_version"] == 8
+    assert cache_manifest["schema_version"] == annotation_support_module.CACHE_SCHEMA_VERSION
     assert cache_manifest["exact_support"] == {
         "canonical_variant_count": 4,
         "canonical_support_edge_count": 8,
@@ -423,6 +423,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
     assert support_rows == [
         {
             "variant_key": "1:102:A>G",
+            "snv_indel_clearance_bp": "2",
             "gene_id": "1",
             "strategy": "s1",
             "alt_support_row_count": "3",
@@ -431,6 +432,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
         },
         {
             "variant_key": "1:103:C>T",
+            "snv_indel_clearance_bp": "1",
             "gene_id": "1",
             "strategy": "s1",
             "alt_support_row_count": "1",
@@ -439,6 +441,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
         },
         {
             "variant_key": "1:104:G>A",
+            "snv_indel_clearance_bp": "500",
             "gene_id": "1",
             "strategy": "s1",
             "alt_support_row_count": "2",
@@ -447,6 +450,7 @@ def test_annotation_support_cache_reproduces_current_report_contract(
         },
         {
             "variant_key": "1:105:AA>A",
+            "snv_indel_clearance_bp": "",
             "gene_id": "1",
             "strategy": "s1",
             "alt_support_row_count": "4",

@@ -295,8 +295,8 @@ and union, preventing support from another gene or consequence from passing a
 selected threshold. Strategy support counts calling strategies for the allele (excluding map-ont
 in Union); it is not recomputed within a consequence or taxonomic selection.
 
-There are exactly three filters: minimum exact-ALT ortholog support, minimum
-strategy support, and human-lineage taxonomy. Numeric support takes the maximum
+Filters include minimum exact-ALT ortholog support, minimum strategy support,
+human-lineage taxonomy, and SNV indel exclusion. Numeric support takes the maximum
 within eligible allele/strategy contexts, never a sum across strategies.
 Taxonomy retains an allele if at least one exact supporting ortholog belongs to
 the selected clade, for both SNVs and indels. It uses the same normalized
@@ -329,6 +329,24 @@ threshold zero visible; its scale selector can switch to linear. Tick labels
 and hover report the original threshold `N`. The gnomAD threshold axis always
 uses linear, unshifted `N`. Both fractions remain on linear percentage axes. Taxonomy uses the same ordered
 categorical axis in both plots; the numeric scale control is disabled for it.
+
+Indel exclusion retains an SNV if any exact supporting ortholog has no called
+insertion or deletion within the selected target-coordinate radius, in the
+same gene and strategy. Radius zero is unfiltered; positive integer radii
+exclude the adjacent bases around raw indel intervals (an insertion is a
+zero-width boundary). Overlapping deletions also exclude the observation.
+Raw indels are considered even when they have no canonical variant key.
+Records of the same ortholog are pooled because durable support does not retain
+event-to-record linkage. This is a proximity filter, not calibrated alignment
+confidence. It is unavailable for indel candidates.
+
+Annotation-support preparation derives `snv_indel_clearance_bp`: the largest
+passing radius across supporters, capped at `INDEL_CLEARANCE_MAX_BP` in
+`analytics/derivations/support.py`; indel rows leave it empty. No nearby indel
+passes every displayed radius. Context/consequence selection precedes the
+maximum across gene contexts; Union retains its existing strategy exclusion.
+Both curves display every integer radius from zero through the cap. Only
+analytics caches change; archived pipeline evidence remains immutable.
 
 ## Code Owners And Checks
 

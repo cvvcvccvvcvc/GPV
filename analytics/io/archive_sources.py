@@ -26,7 +26,7 @@ from run_archiving.archive import build_snapshot, read_archive_manifest, restore
 from run_archiving.rclone import RcloneClient, validate_remote_root
 
 
-PREPARATION_VERSION = 1
+PREPARATION_VERSION = 2
 BLOCK_BASES = 10_000_000
 PACK_SCHEMA = "gaph_prepared_report_source_v1"
 PATH_FIELDS = {

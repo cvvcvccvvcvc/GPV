@@ -39,8 +39,8 @@ from analytics.io.variant_source import (
 from genomics.variants import parse_variant_key, variant_aggregate_key
 
 
-CACHE_SCHEMA_VERSION = 8
-PARTITION_CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 9
+PARTITION_CACHE_SCHEMA_VERSION = 4
 CACHE_DIRNAME = "annotation_support"
 VARIANT_SUPPORT_FILENAME = "variant_strategy_support.tsv.gz"
 EVENTS_FILENAME = "alignment_events.tsv.gz"
@@ -802,6 +802,13 @@ def _collapse_partition(
                 )
             support_rows = support_stream.take(event_group_id)
             _validate_exact_event_support(event_row, support_rows, event_support_path)
+            event_type = event_row["event_type"]
+            if event_type in {"ins", "del"}:
+                exact_support_spool.add_indel(
+                    gene_id=event_row["gene_id"], strategy=event_row["strategy"],
+                    start0=int(event_row["target_start0"]), end0=int(event_row["target_end0"]),
+                    support_rows=support_rows,
+                )
             variant_key = str(map_row.get("variant_key") or "")
             if not variant_key:
                 continue
@@ -840,6 +847,7 @@ def _collapse_partition(
                 gene_id=str(aggregate.get("gene_id") or ""),
                 strategy=str(event_row.get("strategy") or ""),
                 support_rows=support_rows,
+                snv_position=int(event_row["target_start0"]) if event_type == "snv" else None,
             )
         support_stream.finish()
     return aggregates_by_id

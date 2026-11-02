@@ -75,6 +75,7 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
       const color = strategy => strategy === 'union' ? '#242424' : colors[config.strategies.findIndex(item => item.key === strategy) % colors.length];
       const count = value => Number(value || 0).toLocaleString('en-US');
       const taxonomy = () => selects.filter.value === 'taxonomy';
+      const indelClearance = () => selects.filter.value === 'indel_clearance';
       const symbol = () => '≥';
       const commonRows = row => row.filter_key === selects.filter.value && row.variant_type === selects['variant-type'].value
         && row.target_context === selects['target-context'].value && row.consequence === selects.consequence.value;
@@ -82,13 +83,14 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
       const xaxis = (groups, logScale) => {
         if (taxonomy()) return {title: {text: 'Human lineage: broad → narrow'}, type: 'category',
           categoryorder: 'array', categoryarray: config.lineage.map(item => item.label), tickangle: -55};
-        if (!logScale) return {title: {text: 'Threshold (' + symbol() + ' N)'}, type: 'linear', rangemode: 'tozero'};
+        const title = indelClearance() ? 'Indel exclusion radius (bp; 0 = off)' : 'Threshold (' + symbol() + ' N)';
+        if (!logScale) return {title: {text: title}, type: 'linear', rangemode: 'tozero'};
         const max = Math.max(1, ...groups.map(group => group.rows.length ? group.rows[group.rows.length - 1].threshold : 0));
         const ticks = [0];
         for (let power = 1; power <= max; power *= 10) {
           for (const multiplier of [1, 2, 5]) if (power * multiplier <= max) ticks.push(power * multiplier);
         }
-        return {title: {text: 'Threshold (' + symbol() + ' N; log scale of N + 1)'}, type: 'log',
+        return {title: {text: title + '; log scale of N + 1'}, type: 'log',
           tickvals: ticks.map(value => value + 1), ticktext: ticks.map(String)};
       };
       function note(id, text) {
@@ -109,7 +111,7 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
           customdata: rows.map(row => gnomad
             ? [taxonomy() ? config.lineage[row.threshold].label : row.threshold, count(row.gnomad_found_count), count(row.gnomad_eligible_count), count(row.gnomad_lookup_failed_count)]
             : [taxonomy() ? config.lineage[row.threshold].label : row.threshold, count(row.retained_variant_count), count(row.total_variant_count)]),
-          hovertemplate: (taxonomy() ? 'Clade: ' : 'Threshold ' + symbol() + ' ') + '%{customdata[0]}<br>' + (gnomad
+          hovertemplate: (taxonomy() ? 'Clade: ' : indelClearance() ? 'Indel exclusion radius (bp): ' : 'Threshold ' + symbol() + ' ') + '%{customdata[0]}<br>' + (gnomad
             ? 'gnomAD: %{customdata[1]} / %{customdata[2]}<br>Found: %{y:.2%}<br>Failed lookups excluded: %{customdata[3]}'
             : 'Retained: %{customdata[1]} / %{customdata[2]}<br>Fraction: %{y:.2%}') + '<extra>%{fullData.name}</extra>',
         }));
@@ -124,7 +126,10 @@ def basic_filtering_view(analysis: BasicFilteringAnalysis) -> str:
             legend: {orientation: 'h', x: 0, y: -0.3, yanchor: 'top'},
           }, {responsive: true});
         }
-        note('basic-filtering-candidate-status', groups.every(group => !group.rows.length) ? 'No candidate alleles for this selection.' : '');
+        note('basic-filtering-candidate-status', indelClearance() && selects['variant-type'].value !== 'snv'
+          ? 'Indel exclusion is available for SNVs only.'
+          : groups.every(group => !group.rows.length) ? 'No candidate alleles for this selection.'
+          : indelClearance() ? 'Keep an SNV when at least one supporting ortholog has no indel within the selected radius in the same gene and strategy. Radius 0 keeps all SNVs.' : '');
       }
       roles.forEach(role => selects[role].addEventListener('change', renderCandidate));
       renderCandidate();

@@ -77,6 +77,7 @@ def test_filter_score_store_and_candidate_curves_are_allele_level(tmp_path: Path
         "strategy",
         "alt_support_ortholog_count",
         "human_lineage_depth",
+        "snv_indel_clearance_bp",
     ]
     _write_gzip(
         support,
@@ -87,6 +88,7 @@ def test_filter_score_store_and_candidate_curves_are_allele_level(tmp_path: Path
                 "strategy": "s1",
                 "alt_support_ortholog_count": 3,
                 "human_lineage_depth": 0,
+                "snv_indel_clearance_bp": 500,
 
             },
             {
@@ -95,6 +97,7 @@ def test_filter_score_store_and_candidate_curves_are_allele_level(tmp_path: Path
                 "strategy": "s2",
                 "alt_support_ortholog_count": 2,
                 "human_lineage_depth": 0,
+                "snv_indel_clearance_bp": 500,
 
             },
             {
@@ -103,6 +106,7 @@ def test_filter_score_store_and_candidate_curves_are_allele_level(tmp_path: Path
                 "strategy": "s1",
                 "alt_support_ortholog_count": 2,
                 "human_lineage_depth": 0,
+                "snv_indel_clearance_bp": 500,
 
             },
             {
@@ -111,6 +115,7 @@ def test_filter_score_store_and_candidate_curves_are_allele_level(tmp_path: Path
                 "strategy": "s1",
                 "alt_support_ortholog_count": 1,
                 "human_lineage_depth": 0,
+                "snv_indel_clearance_bp": 500,
 
             },
         ],
@@ -199,13 +204,13 @@ def test_scoped_support_does_not_borrow_other_gene_or_consequence(tmp_path, refe
     ], ["variant_key", "gene_id", "event_type", "lookup_status", "gnomad_af", "vep_status", "vep_consequence_terms"])
     _write_gzip(support, [
         dict(variant_key=key, gene_id=gene, strategy=strategy, alt_support_ortholog_count=score,
-             human_lineage_depth=0)
+             human_lineage_depth=0, snv_indel_clearance_bp=500)
         for key, gene, strategy, score in [
             ("1:10:A>G", "1", "s1", 2), ("1:10:A>G", "2", "s1", 50),
             ("1:10:A>G", "1", "s2", 4), ("1:200:A>G", "1", "s1", 10),
             ("1:20:A>G", "1", "s1", 1),
         ]
-    ], ["variant_key", "gene_id", "strategy", "alt_support_ortholog_count", "human_lineage_depth"])
+    ], ["variant_key", "gene_id", "strategy", "alt_support_ortholog_count", "human_lineage_depth", "snv_indel_clearance_bp"])
     _write_gzip(failures, [{"source": "gnomad", "scope": "region", "chrom": "1", "start": 20, "end": 20}],
                 ["source", "scope", "chrom", "start", "end"])
     from analytics.analyses.basic_filtering import build_basic_filtering_analysis
@@ -249,8 +254,8 @@ def test_indel_context_uses_normalized_first_affected_base(tmp_path, references)
                 for key, kind in zip(keys, ["ins", "del"])],
                 ["variant_key", "gene_id", "event_type", "lookup_status", "gnomad_af", "vep_status", "vep_consequence_terms"])
     _write_gzip(support, [dict(variant_key=key, gene_id="1", strategy="s1", alt_support_ortholog_count=2,
-                human_lineage_depth=0) for key in keys],
-                ["variant_key", "gene_id", "strategy", "alt_support_ortholog_count", "human_lineage_depth"])
+                human_lineage_depth=0, snv_indel_clearance_bp=500) for key in keys],
+                ["variant_key", "gene_id", "strategy", "alt_support_ortholog_count", "human_lineage_depth", "snv_indel_clearance_bp"])
     _write_gzip(failures, [], ["source", "scope", "chrom", "start", "end"])
     result = build_basic_filtering_analysis(variant_annotations_source=annotations,
                 variant_strategy_support_tsv=support, annotation_failures_tsv=failures,
@@ -275,7 +280,7 @@ def test_taxonomy_and_union_exclude_long_reads_before_reducing_support(tmp_path,
     annotation_rows.append({**annotation_rows[2], 'gene_id': '2', 'vep_consequence_terms': 'missense_variant'})
     _write_gzip(annotations, annotation_rows, list(annotation_rows[0]))
     support_rows = [dict(variant_key=keys[i], gene_id=gene, strategy=strategy,
-        alt_support_ortholog_count=count, human_lineage_depth=level) for i,gene,strategy,count,level in [
+        alt_support_ortholog_count=count, human_lineage_depth=level, snv_indel_clearance_bp=500) for i,gene,strategy,count,level in [
         (0,'1','s1',2,depth['Mammalia']), (0,'1',LONG_READ_STRATEGY,100,depth['Homininae']),
         (1,'1',LONG_READ_STRATEGY,100,depth['Homininae']),
         (2,'1','s1',3,depth['Primates']), (2,'1','s2',2,depth['Mammalia']),
@@ -291,7 +296,7 @@ def test_taxonomy_and_union_exclude_long_reads_before_reducing_support(tmp_path,
     streamed = build_basic_filtering_analysis(**kwargs, cache_policy='discard')
     pd.testing.assert_frame_equal(result.candidate_curves, streamed.candidate_curves)
     curves = result.candidate_curves
-    assert set(curves.filter_key) == {'ortholog','strategy','taxonomy'}
+    assert set(curves.filter_key) == {'ortholog','strategy','taxonomy','indel_clearance'}
     def curve(metric='taxonomy', strategy='union', kind='snv', consequence='all'):
         return curves[curves.filter_key.eq(metric) & curves.strategy.eq(strategy)
             & curves.variant_type.eq(kind) & curves.target_context.eq('all')
@@ -311,3 +316,55 @@ def test_taxonomy_and_union_exclude_long_reads_before_reducing_support(tmp_path,
     assert curve('strategy', kind='indel').loc[2,'retained_variant_count'] == 1
     assert curve(kind='indel').loc[depth['Homininae'],'retained_variant_count'] == 1
     assert curve(kind='indel', consequence='synonymous').loc[depth['Homininae'],'retained_variant_count'] == 0
+
+
+def test_indel_radius_curve_scopes_support_and_keeps_zero_baseline(tmp_path, references):
+    from analytics.analyses.basic_filtering import build_basic_filtering_analysis, LONG_READ_STRATEGY
+    annotations, support, failures = [tmp_path / name for name in ('a.tsv.gz', 's.tsv.gz', 'f.tsv.gz')]
+    rows = [dict(variant_key=key, gene_id='1', event_type=kind, lookup_status='ok', gnomad_af=af,
+                 vep_status='ok', vep_consequence_terms='synonymous_variant') for key, kind, af in [
+        ('1:10:A>G','snv','0.01'), ('1:20:A>G','snv',''), ('1:30:A>G','snv',''),
+        ('1:40:A>G','snv','0.01'), ('1:50:A>AT','ins',''),
+    ]]
+    rows.append({**rows[0], 'gene_id':'2', 'vep_consequence_terms':'missense_variant'})
+    _write_gzip(annotations, rows, list(rows[0]))
+    support_rows = [dict(variant_key=key, gene_id=gene, strategy=strategy,
+                        alt_support_ortholog_count=1, human_lineage_depth=0,
+                        snv_indel_clearance_bp=clearance) for key, gene, strategy, clearance in [
+        ('1:10:A>G','1','s1',4), ('1:10:A>G','2','s1',500), ('1:10:A>G','1','s2',9),
+        ('1:20:A>G','1','s1',0), ('1:20:A>G','1',LONG_READ_STRATEGY,500),
+        ('1:30:A>G','1','s1',500), ('1:40:A>G','1',LONG_READ_STRATEGY,500),
+        ('1:50:A>AT','1','s1',''),
+    ]]
+    _write_gzip(support, support_rows, list(support_rows[0]))
+    _write_gzip(failures, [dict(source='gnomad',scope='region',chrom='1',start=30,end=30)],
+                ['source','scope','chrom','start','end'])
+    kwargs = dict(variant_annotations_source=annotations, variant_strategy_support_tsv=support,
+                  annotation_failures_tsv=failures, analytics_dir=tmp_path/'analytics',
+                  strategies=['s1','s2',LONG_READ_STRATEGY], **references)
+    curves = build_basic_filtering_analysis(**kwargs).candidate_curves
+    pd.testing.assert_frame_equal(curves, build_basic_filtering_analysis(**kwargs, cache_policy='discard').candidate_curves)
+    radius = curves[curves.filter_key.eq('indel_clearance')]
+    assert set(radius.variant_type) == {'snv'}
+    def curve(strategy='s1', context='cds', consequence='synonymous'):
+        return radius[radius.strategy.eq(strategy) & radius.target_context.eq(context)
+                      & radius.consequence.eq(consequence)].set_index('threshold')
+    selected = curve()
+    assert selected.index.tolist() == list(range(501))
+    assert selected.loc[0,'retained_variant_count'] == selected.loc[0,'total_variant_count'] == 3
+    assert selected.loc[0,'gnomad_found_fraction'] == 0.5
+    assert selected.loc[1,'retained_variant_count'] == 2
+    assert selected.loc[4,'retained_variant_count'] == 2
+    assert selected.loc[5,'retained_variant_count'] == 1
+    assert selected.loc[500,'retained_variant_count'] == 1
+    assert selected.loc[5,'gnomad_lookup_failed_count'] == 1
+    assert pd.isna(selected.loc[5,'gnomad_found_fraction'])
+    assert curve('union').loc[5,'retained_variant_count'] == 2
+    assert curve('union').loc[10,'retained_variant_count'] == 1
+    assert curve(context='all',consequence='all').loc[500,'retained_variant_count'] == 2
+    assert curve(context='all').loc[500,'retained_variant_count'] == 1
+
+    support_rows[0]['snv_indel_clearance_bp'] = ''
+    _write_gzip(support, support_rows, list(support_rows[0]))
+    with pytest.raises(ValueError, match='invalid filter scores'):
+        build_basic_filtering_analysis(**kwargs, cache_policy='discard')

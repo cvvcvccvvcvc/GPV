@@ -8,7 +8,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-
+INDEL_CLEARANCE_MAX_BP = 500
 
 VARIANT_STRATEGY_SUPPORT_FIELDS = [
     "variant_key",
@@ -17,6 +17,7 @@ VARIANT_STRATEGY_SUPPORT_FIELDS = [
     "alt_support_row_count",
     "alt_support_ortholog_count",
     "human_lineage_depth",
+    "snv_indel_clearance_bp",
 ]
 EVENT_ORTHOLOG_SUPPORT_FIELDS = [
     "event_group_id",
@@ -31,6 +32,7 @@ EVENT_ORTHOLOG_SUPPORT_FIELDS = [
 class StrategySupport:
     row_count: int = 0
     ortholog_count: int = 0
+    snv_indel_clearance_bp: int | None = None
 
 
 class ExactSupportSpool:
@@ -39,6 +41,9 @@ class ExactSupportSpool:
     def __init__(self, path: Path):
         self.path = path
         self.handle = path.open("w", buffering=1024 * 1024)
+        self.indel_path = path.with_suffix(".indels.tsv")
+        self.indel_handle = self.indel_path.open("w", buffering=1024 * 1024)
+        self.indel_edge_count = 0
         self.strategy_ids: dict[str, int] = {}
         self.strategy_names: list[str] = []
         self.ortholog_ids: dict[tuple[str, str], int] = {}
@@ -53,6 +58,8 @@ class ExactSupportSpool:
     def close(self) -> None:
         if not self.handle.closed:
             self.handle.close()
+        if not self.indel_handle.closed:
+            self.indel_handle.close()
 
     def _strategy_id(self, strategy: str) -> int:
         strategy_id = self.strategy_ids.get(strategy)
@@ -77,6 +84,7 @@ class ExactSupportSpool:
         gene_id: str,
         strategy: str,
         support_rows: Iterable[Mapping[str, str]],
+        snv_position: int | None,
     ) -> None:
         if variant_context_id < 1:
             raise ValueError("Exact support requires a positive variant_context_id")
@@ -96,9 +104,22 @@ class ExactSupportSpool:
             ortholog_id = self._ortholog_id(gene_id, ortholog_gene_id)
             self.handle.write(
                 f"{variant_context_id}\t{strategy_id}\t{ortholog_id}\t"
-                f"{support_row_count}\n"
+                f"{support_row_count}\t{'' if snv_position is None else snv_position}\n"
             )
             self.input_edge_count += 1
+
+    def add_indel(
+        self, *, gene_id: str, strategy: str, start0: int, end0: int,
+        support_rows: Iterable[Mapping[str, str]],
+    ) -> None:
+        """Retain raw gap geometry, including gaps without a canonical allele."""
+        if not gene_id or not strategy or not 0 <= start0 <= end0:
+            raise ValueError("Indel support requires gene, strategy and valid target coordinates")
+        strategy_id = self._strategy_id(strategy)
+        for row in support_rows:
+            ortholog_id = self._ortholog_id(gene_id, str(row["ortholog_gene_id"]))
+            self.indel_handle.write(f"{strategy_id}\t{ortholog_id}\t{start0}\t{end0}\n")
+            self.indel_edge_count += 1
 
 
 class EventOrthologSupportStream:
@@ -187,6 +208,7 @@ def aggregate_exact_support(
                 variant_context_id,
                 strategy_id,
                 ortholog_id,
+                MIN(snv_position) AS snv_position,
                 CAST(SUM(support_row_count) AS UBIGINT) AS support_row_count
             FROM read_csv(
                 {_sql_string(spool.path)},
@@ -197,26 +219,30 @@ def aggregate_exact_support(
                     'variant_context_id': 'UBIGINT',
                     'strategy_id': 'UINTEGER',
                     'ortholog_id': 'UBIGINT',
-                    'support_row_count': 'UBIGINT'
+                    'support_row_count': 'UBIGINT',
+                    'snv_position': 'BIGINT'
                 }}
             )
             GROUP BY variant_context_id, strategy_id, ortholog_id
             """
         )
+        _aggregate_indel_clearance(connection, spool)
         cursor = connection.execute(
             """
             SELECT
-                variant_context_id,
-                strategy_id,
+                s.variant_context_id,
+                s.strategy_id,
                 COUNT(*) AS ortholog_count,
-                SUM(support_row_count) AS row_count
-            FROM exact_support
-            GROUP BY variant_context_id, strategy_id
-            ORDER BY variant_context_id, strategy_id
+                SUM(s.support_row_count) AS row_count,
+                MAX(c.clearance_bp) AS clearance_bp
+            FROM exact_support s
+            LEFT JOIN indel_clearance c USING (variant_context_id, strategy_id)
+            GROUP BY s.variant_context_id, s.strategy_id
+            ORDER BY s.variant_context_id, s.strategy_id
             """
         )
         while batch := cursor.fetchmany(100_000):
-            for variant_context_id, strategy_id, ortholog_count, row_count in batch:
+            for variant_context_id, strategy_id, ortholog_count, row_count, clearance in batch:
                 variant_index = int(variant_context_id)
                 if variant_index >= len(aggregates_by_id):
                     raise ValueError(f"Unknown variant_context_id: {variant_index}")
@@ -238,6 +264,7 @@ def aggregate_exact_support(
                 support_by_strategy[strategy] = StrategySupport(
                     row_count=int(row_count),
                     ortholog_count=int(ortholog_count),
+                    snv_indel_clearance_bp=None if clearance is None else int(clearance),
                 )
 
         for variant_context_id, aggregate in enumerate(aggregates_by_id[1:], start=1):
@@ -253,7 +280,54 @@ def aggregate_exact_support(
         )
     finally:
         connection.execute("DROP TABLE IF EXISTS exact_support")
+        connection.execute("DROP TABLE IF EXISTS indel_clearance")
         spool.path.unlink(missing_ok=True)
+        spool.indel_path.unlink(missing_ok=True)
+
+
+def _aggregate_indel_clearance(connection, spool: ExactSupportSpool) -> None:
+    """Maximum indel-free radius across exact supporters, bounded for the report.
+
+    Ortholog IDs already include the target gene. Adjacent bases have distance
+    one; radius zero always passes. Raw records of the same ortholog are pooled.
+    Two nearest-interval joins avoid expanding each SNV to hundreds of radii.
+    """
+    limit = INDEL_CLEARANCE_MAX_BP
+    if not spool.indel_edge_count:
+        connection.execute(f"""CREATE TEMP TABLE indel_clearance AS
+            SELECT variant_context_id, strategy_id, {limit} AS clearance_bp
+            FROM exact_support WHERE snv_position IS NOT NULL GROUP BY ALL""")
+        return
+    try:
+        connection.execute(f"""CREATE TEMP TABLE indel_bounds AS
+            WITH bounds AS (
+                SELECT strategy_id, ortholog_id, start0, max(end0) AS end0
+                FROM read_csv({_sql_string(spool.indel_path)}, delim='\t', header=false,
+                    auto_detect=false, columns={{'strategy_id':'UINTEGER',
+                    'ortholog_id':'UBIGINT','start0':'BIGINT','end0':'BIGINT'}})
+                GROUP BY strategy_id, ortholog_id, start0)
+            SELECT strategy_id, ortholog_id, start0,
+                max(end0) OVER (PARTITION BY strategy_id, ortholog_id ORDER BY start0
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS max_end
+            FROM bounds""")
+        connection.execute(f"""CREATE TEMP TABLE snv_left_distance AS
+            SELECT s.variant_context_id, s.strategy_id, s.ortholog_id, s.snv_position,
+                CASE WHEN i.start0 IS NULL THEN {limit + 1}
+                    ELSE greatest(0, s.snv_position-i.max_end+1) END AS left_distance
+            FROM (SELECT * FROM exact_support WHERE snv_position IS NOT NULL) s
+            ASOF LEFT JOIN indel_bounds i ON s.strategy_id=i.strategy_id
+                AND s.ortholog_id=i.ortholog_id AND s.snv_position>=i.start0""")
+        connection.execute(f"""CREATE TEMP TABLE indel_clearance AS
+            SELECT s.variant_context_id, s.strategy_id,
+                max(least({limit}, greatest(0, least(s.left_distance,
+                    coalesce(i.start0-s.snv_position,{limit + 1}))-1))) AS clearance_bp
+            FROM snv_left_distance s ASOF LEFT JOIN indel_bounds i
+                ON s.strategy_id=i.strategy_id AND s.ortholog_id=i.ortholog_id
+                AND s.snv_position<i.start0
+            GROUP BY s.variant_context_id, s.strategy_id""")
+    finally:
+        connection.execute("DROP TABLE IF EXISTS snv_left_distance")
+        connection.execute("DROP TABLE IF EXISTS indel_bounds")
 
 
 def build_variant_strategy_support(aggregates: Iterable[dict]) -> tuple[list[dict[str, object]], int]:
@@ -272,6 +346,7 @@ def build_variant_strategy_support(aggregates: Iterable[dict]) -> tuple[list[dic
                 "alt_support_row_count": support.row_count,
                 "alt_support_ortholog_count": support.ortholog_count,
                 "human_lineage_depth": aggregate["_taxonomy_depth_by_strategy"][strategy],
+                "snv_indel_clearance_bp": support.snv_indel_clearance_bp,
             })
     rows.sort(key=lambda row: (_int_or_default(row["gene_id"], 10**18), row["variant_key"], row["strategy"]))
     return rows, missing_key_count

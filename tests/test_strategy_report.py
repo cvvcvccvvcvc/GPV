@@ -976,6 +976,9 @@ def test_basic_filtering_view_has_shared_selectors_and_log_thresholds(
     assert "Supporting families" not in html
     assert "Site-aligned orthologs" not in html
     assert "Human-lineage taxonomy" in html
+    assert "Indel exclusion radius (bp; SNVs)" in html
+    assert "Radius 0 keeps all SNVs" in html
+    assert "Indel exclusion is available for SNVs only" in html
     assert "Union (excluding minimap2 map-ont)" in html
     assert "type: 'log'" in html
     assert "type: 'linear'" in html

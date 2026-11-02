@@ -566,10 +566,10 @@ def test_partition_timings_are_preserved_and_summed(tmp_path: Path) -> None:
 
 
 def test_analytics_support_schema_is_not_part_of_stage3_manifest() -> None:
-    assert VARIANT_STRATEGY_SUPPORT_FIELDS[-1] == "human_lineage_depth"
+    assert VARIANT_STRATEGY_SUPPORT_FIELDS[-1] == "snv_indel_clearance_bp"
     assert set(VARIANT_STRATEGY_SUPPORT_FIELDS) == {
         "variant_key", "gene_id", "strategy", "alt_support_row_count",
-        "alt_support_ortholog_count", "human_lineage_depth",
+        "alt_support_ortholog_count", "human_lineage_depth", "snv_indel_clearance_bp",
     }
     assert "variant_strategy_site_depth_count" not in COUNT_FIELDS
 
@@ -656,6 +656,7 @@ def test_exact_support_spool_counts_distinct_orthologs(tmp_path: Path) -> None:
     ]:
         spool.add_group(
             variant_context_id=1,
+            snv_position=99,
             gene_id="1",
             strategy=strategy,
             support_rows=[
@@ -682,6 +683,7 @@ def test_exact_support_spool_counts_distinct_orthologs(tmp_path: Path) -> None:
             "alt_support_row_count": 3,
             "alt_support_ortholog_count": 2,
             "human_lineage_depth": 0,
+            "snv_indel_clearance_bp": 500,
         },
         {
             "variant_key": "1:100:A>G",
@@ -690,6 +692,7 @@ def test_exact_support_spool_counts_distinct_orthologs(tmp_path: Path) -> None:
             "alt_support_row_count": 1,
             "alt_support_ortholog_count": 1,
             "human_lineage_depth": 0,
+            "snv_indel_clearance_bp": 500,
         },
     ]
 
@@ -780,11 +783,45 @@ def test_variant_strategy_support_uses_exact_edge_multiplicity() -> None:
     assert rows[0]["alt_support_ortholog_count"] == 3
 
 
+def test_indel_clearance_respects_boundaries_and_exact_support(tmp_path: Path) -> None:
+    positions = [9, 10, 14, 15, 19, 20, 24, 25, 30, 525]
+    aggregates = [None] + [{"_support_by_strategy": {}} for _ in positions]
+    spool = ExactSupportSpool(tmp_path / "support.tsv")
+    supporter = [{"ortholog_gene_id": "o1", "support_row_count": "1"}]
+    for start, end in [(10, 10), (20, 25), (22, 23)]:
+        spool.add_indel(gene_id="1", strategy="s1", start0=start, end0=end, support_rows=supporter)
+    # Neither another gene with the same ortholog ID nor another strategy can
+    # contaminate the distances. Nested deletions must retain the longer end.
+    spool.add_indel(gene_id="2", strategy="s1", start0=0, end0=1000, support_rows=supporter)
+    spool.add_indel(gene_id="1", strategy="s2", start0=0, end0=1000, support_rows=supporter)
+    for context, pos in enumerate(positions, 1):
+        spool.add_group(variant_context_id=context, gene_id="1", strategy="s1",
+                        snv_position=pos, support_rows=supporter)
+    with duckdb.connect() as connection:
+        aggregate_exact_support(connection, spool, aggregates)
+    assert [a["_support_by_strategy"]["s1"].snv_indel_clearance_bp for a in aggregates[1:]] == [
+        0, 0, 4, 4, 0, 0, 0, 0, 5, 500,
+    ]
+    assert not spool.indel_path.exists()
+
+    # One distant supporter suffices, independent of raw row multiplicity.
+    aggregates = [None, {"_support_by_strategy": {}}]
+    spool = ExactSupportSpool(tmp_path / "any_support.tsv")
+    spool.add_indel(gene_id="1", strategy="s1", start0=10, end0=10, support_rows=supporter)
+    spool.add_group(variant_context_id=1, gene_id="1", strategy="s1", snv_position=10,
+                    support_rows=[{"ortholog_gene_id":"o1", "support_row_count":"100"},
+                                  {"ortholog_gene_id":"o2", "support_row_count":"1"}])
+    with duckdb.connect() as connection:
+        aggregate_exact_support(connection, spool, aggregates)
+    assert aggregates[1]["_support_by_strategy"]["s1"].snv_indel_clearance_bp == 500
+
+
 def test_exact_support_spool_requires_one_strategy(tmp_path: Path) -> None:
     with ExactSupportSpool(tmp_path / "exact_support.tsv") as spool:
         with pytest.raises(ValueError, match="requires one alignment strategy"):
             spool.add_group(
                 variant_context_id=1,
+                snv_position=99,
                 gene_id="1",
                 strategy="",
                 support_rows=[

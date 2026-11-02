@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from analytics.derivations.taxonomy import HUMAN_LINEAGE
+from analytics.derivations.support import INDEL_CLEARANCE_MAX_BP
 from analytics.io.artifacts import path_metadata, write_json_atomic
 from analytics.io.duckdb import available_cpu_count, configure_duckdb_memory
 from analytics.io.variant_source import (
@@ -33,7 +34,7 @@ from .variant_summary_aggregation import _common_prefix_sql, _register_reference
 CANDIDATE_CONSEQUENCE_OPTIONS = (*CONSEQUENCE_OPTIONS, ("not_annotated", "Not annotated"))
 
 
-FILTER_SCORE_SCHEMA_VERSION = 4
+FILTER_SCORE_SCHEMA_VERSION = 5
 UNION_STRATEGY = "union"
 LONG_READ_STRATEGY = "minimap2_map_ont_pseudoreads_30000_15000"
 UNION_LABEL = "Union (excluding minimap2 map-ont)"
@@ -48,11 +49,13 @@ FILTER_SCORE_COLUMNS = [
     "strategy_support",
     "primary_strategy_support",
     "taxonomy_depth",
+    "snv_indel_clearance_bp",
 ]
 FILTER_OPTIONS = [
     ("ortholog", "Exact-ALT ortholog support", "ortholog_support"),
     ("strategy", "Strategy support", "strategy_support"),
     ("taxonomy", "Human-lineage taxonomy", "taxonomy_depth"),
+    ("indel_clearance", "Indel exclusion radius (bp; SNVs)", "snv_indel_clearance_bp"),
 ]
 
 
@@ -227,6 +230,7 @@ def _resolve_filter_sources(variant_annotations_source, variant_strategy_support
         "strategy",
         "alt_support_ortholog_count",
         "human_lineage_depth",
+        "snv_indel_clearance_bp",
     }
     missing = required_support - set(support_columns)
     if missing:
@@ -325,14 +329,17 @@ def _filter_score_connection(*, source, support_path, support_columns, annotatio
         connection.execute(
             "CREATE TEMP VIEW typed_support AS SELECT variant_key, gene_id, trim(strategy) AS strategy, "
             "try_cast(alt_support_ortholog_count AS BIGINT) AS ortholog_support, "
-            "try_cast(human_lineage_depth AS BIGINT) AS taxonomy_depth "
+            "try_cast(human_lineage_depth AS BIGINT) AS taxonomy_depth, "
+            "try_cast(snv_indel_clearance_bp AS BIGINT) AS snv_indel_clearance_bp "
             "FROM strategy_support_rows"
         )
         invalid = int(
             connection.execute(
                 "SELECT count(*) FROM typed_support s JOIN global_annotations a USING (variant_key) "
                 "WHERE coalesce(s.strategy, '') IN ('', 'union') OR ortholog_support IS NULL OR ortholog_support < 1 "
-                f"OR taxonomy_depth IS NULL OR taxonomy_depth < 0 OR taxonomy_depth >= {len(HUMAN_LINEAGE)}"
+                f"OR taxonomy_depth IS NULL OR taxonomy_depth < 0 OR taxonomy_depth >= {len(HUMAN_LINEAGE)} "
+                "OR (a.variant_type = 'snv' AND (snv_indel_clearance_bp IS NULL "
+                f"OR snv_indel_clearance_bp < 0 OR snv_indel_clearance_bp > {INDEL_CLEARANCE_MAX_BP}))"
             ).fetchone()[0]
         )
         if invalid:
@@ -379,7 +386,8 @@ def _filter_score_connection(*, source, support_path, support_columns, annotatio
         connection.execute(
             "CREATE TEMP TABLE compact_support AS SELECT variant_key, strategy, "
             "coalesce(scope.target_context, 'other') AS target_context, consequence, "
-            "max(ortholog_support) AS ortholog_support, max(taxonomy_depth) AS taxonomy_depth "
+            "max(ortholog_support) AS ortholog_support, max(taxonomy_depth) AS taxonomy_depth, "
+            "max(snv_indel_clearance_bp) AS snv_indel_clearance_bp "
             "FROM scoped_support, LATERAL (VALUES ('all'), (target_context)) scope(target_context) "
             "GROUP BY variant_key, strategy, scope.target_context, consequence"
         )
@@ -390,7 +398,7 @@ def _filter_score_connection(*, source, support_path, support_columns, annotatio
             "FROM typed_support GROUP BY variant_key) "
             "SELECT s.variant_key, s.strategy, a.variant_type, a.gnomad_status, "
             "s.target_context, s.consequence, s.ortholog_support, n.strategy_support, "
-            "n.primary_strategy_support, s.taxonomy_depth "
+            "n.primary_strategy_support, s.taxonomy_depth, s.snv_indel_clearance_bp "
             "FROM compact_support s JOIN global_annotations a USING (variant_key) "
             "JOIN strategy_counts n USING (variant_key)"
         )
@@ -413,12 +421,13 @@ def _filter_score_histograms(connection, relation: str) -> pd.DataFrame:
         f"WITH individual AS MATERIALIZED (SELECT * FROM {relation}), "
         "combined AS (SELECT variant_key, 'union' AS strategy, variant_type, gnomad_status, target_context, consequence, "
         "max(ortholog_support) AS ortholog_support, max(primary_strategy_support) AS strategy_support, "
-        "max(taxonomy_depth) AS taxonomy_depth FROM individual "
+        "max(taxonomy_depth) AS taxonomy_depth, max(snv_indel_clearance_bp) AS snv_indel_clearance_bp FROM individual "
         f"WHERE strategy <> {sql_string(LONG_READ_STRATEGY)} "
         "GROUP BY variant_key, variant_type, gnomad_status, target_context, consequence), "
         "scores AS (SELECT * EXCLUDE (primary_strategy_support) FROM individual UNION ALL SELECT * FROM combined) "
         "SELECT strategy, variant_type, target_context, consequence, filter_key, score, gnomad_status, count(*) AS variant_count "
         f"FROM scores, LATERAL (VALUES {metrics}) AS metric(filter_key, score) "
+        "WHERE filter_key <> 'indel_clearance' OR variant_type = 'snv' "
         "GROUP BY ALL"
     ).fetchdf()
 
@@ -450,7 +459,9 @@ def candidate_curves_from_histograms(histograms: pd.DataFrame) -> pd.DataFrame:
         subset["variant_count"] = pd.to_numeric(
             subset["variant_count"], errors="raise"
         ).astype(int)
-        max_score = max(int(subset["score"].max()), len(HUMAN_LINEAGE) - 1 if filter_key == "taxonomy" else 0)
+        fixed_max = (len(HUMAN_LINEAGE) - 1 if filter_key == "taxonomy" else
+                     INDEL_CLEARANCE_MAX_BP if filter_key == "indel_clearance" else 0)
+        max_score = max(int(subset["score"].max()), fixed_max)
         totals = {
             status: np.bincount(
                 subset.loc[subset["gnomad_status"].eq(status), "score"],
@@ -466,7 +477,8 @@ def candidate_curves_from_histograms(histograms: pd.DataFrame) -> pd.DataFrame:
             for status, values in totals.items()
         }
         total = int(subset["variant_count"].sum())
-        thresholds = range(len(HUMAN_LINEAGE)) if filter_key == "taxonomy" else range(1, max_score + 2)
+        thresholds = (range(fixed_max + 1) if filter_key in {"taxonomy", "indel_clearance"}
+                      else range(1, max_score + 2))
         for threshold in thresholds:
             found = int(cumulative["found"][threshold])
             not_found = int(cumulative["not_found"][threshold])
